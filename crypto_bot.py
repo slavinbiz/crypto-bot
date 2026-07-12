@@ -727,7 +727,7 @@ async def signal_loop(app: Application):
         direction = "long" if "ПАМП" in desc else "short"
 
         funding = g_funding_rates.get(symbol)
-        trend_verdict = fetch_trend_verdict(symbol, direction, price_now)
+        trend_verdict = await asyncio.to_thread(fetch_trend_verdict, symbol, direction, price_now)
 
         caption = fmt_caption(
             pair_name, signal_label, pump_pct,
