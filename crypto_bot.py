@@ -724,12 +724,15 @@ async def signal_loop(app: Application):
         pair_name  = symbol.replace("USDT", "/USDT")
 
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
+        direction = "long" if "ПАМП" in desc else "short"
 
         funding = g_funding_rates.get(symbol)
+        trend_verdict = fetch_trend_verdict(symbol, direction, price_now)
 
         caption = fmt_caption(
             pair_name, signal_label, pump_pct,
-            price_then, price_now, chg_24h, vol_str, funding
+            price_then, price_now, chg_24h, vol_str, funding,
+            trend_label=trend_verdict["label"]
         )
 
         log.info(f"Сигнал: {symbol} — {desc.split(chr(10))[0]}")
