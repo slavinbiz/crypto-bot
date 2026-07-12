@@ -177,12 +177,12 @@ def get_funding_rates() -> dict[str, float]:
         return {}
 
 
-def get_klines(symbol: str, interval: str, limit: int) -> list[dict]:
+def get_klines(symbol: str, interval: str, limit: int, timeout: int = 10) -> list[dict]:
     """Получить свечи с Binance."""
     r = requests.get(
         f"{BASE}/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
-        timeout=10
+        timeout=timeout
     )
     r.raise_for_status()
     candles = []
@@ -202,8 +202,8 @@ def get_klines(symbol: str, interval: str, limit: int) -> list[dict]:
 def fetch_trend_verdict(symbol: str, direction: str, price: float) -> dict:
     """Обёртка над ema_trend.get_trend_verdict с сетевыми запросами и обработкой ошибок."""
     try:
-        trend_candles    = get_klines(symbol, ema_trend.TREND_INTERVAL, ema_trend.TREND_LIMIT)
-        pullback_candles = get_klines(symbol, ema_trend.PULLBACK_INTERVAL, ema_trend.PULLBACK_LIMIT)
+        trend_candles    = get_klines(symbol, ema_trend.TREND_INTERVAL, ema_trend.TREND_LIMIT, timeout=4)
+        pullback_candles = get_klines(symbol, ema_trend.PULLBACK_INTERVAL, ema_trend.PULLBACK_LIMIT, timeout=4)
         return ema_trend.get_trend_verdict(direction, price, trend_candles, pullback_candles)
     except Exception as e:
         log.warning(f"Не удалось получить тренд-вердикт для {symbol}: {e}")
@@ -726,7 +726,6 @@ async def signal_loop(app: Application):
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
         direction = "long" if "ПАМП" in desc else "short"
 
-        funding = g_funding_rates.get(symbol)
         trend_verdict = await asyncio.to_thread(fetch_trend_verdict, symbol, direction, price_now)
 
         caption = fmt_caption(

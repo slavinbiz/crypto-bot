@@ -15,6 +15,9 @@ def test_save_settings_writes_ema_threshold(tmp_path, monkeypatch):
     settings_file = tmp_path / "bot_settings.json"
     monkeypatch.setattr(crypto_bot, "SETTINGS_FILE", str(settings_file))
     ema_trend.EMA_DISTANCE_THRESHOLD_PCT = 0.8
-    crypto_bot.save_settings()
-    saved = json.loads(settings_file.read_text())
-    assert saved["EMA_DISTANCE_THRESHOLD_PCT"] == 0.8
+    try:
+        crypto_bot.save_settings()
+        saved = json.loads(settings_file.read_text())
+        assert saved["EMA_DISTANCE_THRESHOLD_PCT"] == 0.8
+    finally:
+        ema_trend.EMA_DISTANCE_THRESHOLD_PCT = 0.5
