@@ -28,18 +28,20 @@ from telegram.constants import ParseMode
 
 import ema_trend
 
-def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None) -> str:
+def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None, trend_label=None) -> str:
     """Формирует caption без конфликтов с Markdown."""
     funding_str = ""
     if funding is not None:
         emoji = "🟢" if funding > 0 else "🔴" if funding < 0 else "⚪"
         funding_str = f"\nФандинг: {emoji} {funding:+.4f}%"
+    trend_str = f"\nТренд: {trend_label}" if trend_label else ""
     return (
         f"<code>{pair_name}</code>\n"
         f"{signal_label}: <b>{pump_pct:+.1f}%</b>\n"
         f"<code>{price_then:.5g}</code> → <code>{price_now:.5g}</code>\n"
         f"24h: {chg_24h:+.2f}%   Vol: {vol_str}"
         f"{funding_str}"
+        f"{trend_str}"
     )
 
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
