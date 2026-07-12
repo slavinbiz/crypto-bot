@@ -197,6 +197,17 @@ def get_klines(symbol: str, interval: str, limit: int) -> list[dict]:
     return candles
 
 
+def fetch_trend_verdict(symbol: str, direction: str, price: float) -> dict:
+    """Обёртка над ema_trend.get_trend_verdict с сетевыми запросами и обработкой ошибок."""
+    try:
+        trend_candles    = get_klines(symbol, ema_trend.TREND_INTERVAL, ema_trend.TREND_LIMIT)
+        pullback_candles = get_klines(symbol, ema_trend.PULLBACK_INTERVAL, ema_trend.PULLBACK_LIMIT)
+        return ema_trend.get_trend_verdict(direction, price, trend_candles, pullback_candles)
+    except Exception as e:
+        log.warning(f"Не удалось получить тренд-вердикт для {symbol}: {e}")
+        return {"verdict": "unknown", "label": "⚪ Не удалось проверить", "distance_pct": None}
+
+
 def get_pair_age_days(symbol: str) -> float:
     """Возраст пары в днях."""
     r = requests.get(
