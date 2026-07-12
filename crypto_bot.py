@@ -26,6 +26,8 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, Bo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 
+import ema_trend
+
 def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None) -> str:
     """Формирует caption без конфликтов с Markdown."""
     funding_str = ""
@@ -423,7 +425,10 @@ def load_settings():
             PUMP_PCT          = s.get("PUMP_PCT",           PUMP_PCT)
             IIV_HOT           = s.get("IIV_HOT",            IIV_HOT)
             MIN_PAIR_AGE_DAYS = s.get("MIN_PAIR_AGE_DAYS",  MIN_PAIR_AGE_DAYS)
-        log.info(f"Настройки загружены: vol=${MIN_VOLUME_USDT//1_000_000}M pump={PUMP_PCT}% iiv={IIV_HOT}x age={MIN_PAIR_AGE_DAYS//30}мес")
+            ema_trend.EMA_DISTANCE_THRESHOLD_PCT = s.get(
+                "EMA_DISTANCE_THRESHOLD_PCT", ema_trend.EMA_DISTANCE_THRESHOLD_PCT
+            )
+        log.info(f"Настройки загружены: vol=${MIN_VOLUME_USDT//1_000_000}M pump={PUMP_PCT}% iiv={IIV_HOT}x age={MIN_PAIR_AGE_DAYS//30}мес ema_dist={ema_trend.EMA_DISTANCE_THRESHOLD_PCT}%")
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -434,6 +439,7 @@ def save_settings():
             "PUMP_PCT":          PUMP_PCT,
             "IIV_HOT":           IIV_HOT,
             "MIN_PAIR_AGE_DAYS": MIN_PAIR_AGE_DAYS,
+            "EMA_DISTANCE_THRESHOLD_PCT": ema_trend.EMA_DISTANCE_THRESHOLD_PCT,
         }, f)
 
 # ─── ГЛОБАЛЬНОЕ СОСТОЯНИЕ (для команд) ───────────────────────────────────────
