@@ -36,7 +36,7 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
         funding_str = f"\nФандинг: {emoji} {funding:+.4f}%"
     trend_str = f"\nТренд: {trend_label}" if trend_label else ""
     return (
-        f"<code>{pair_name}</code>\n"
+        f"<code>{pair_name}</code>  <i>Binance</i>\n"
         f"{signal_label}: <b>{pump_pct:+.1f}%</b>\n"
         f"<code>{price_then:.5g}</code> → <code>{price_now:.5g}</code>\n"
         f"24h: {chg_24h:+.2f}%   Vol: {vol_str}"
@@ -423,7 +423,7 @@ def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str
     vol_str   = f"{vol_24h/1e9:.1f}B" if vol_24h >= 1e9 else f"{vol_24h/1e6:.1f}M"
 
     fig.text(0.01, 0.97,
-             f"{pair_name}   {price_now:,.5g}   24h: {chg_24h:+.2f}%   Vol: {vol_str}   {arrow} {price_change:+.2f}%",
+             f"{pair_name}   Binance   {price_now:,.5g}   24h: {chg_24h:+.2f}%   Vol: {vol_str}   {arrow} {price_change:+.2f}%",
              color="#ffffff", fontsize=12, fontweight="bold", va="top", fontfamily="monospace")
 
     sig_color = "#00c853" if ("LONG" in signal_desc or "ПАМП" in signal_desc) else "#ff1744"
@@ -481,6 +481,7 @@ g_valid_symbols: list[str] = []
 g_signals_total: int = 0
 g_started_at: float = time.time()
 g_funding_rates: dict[str, float] = {}  # фандинг по символам
+g_background_tasks: set = set()  # держим ссылки, чтобы asyncio не собрал таски раньше времени
 g_reload_event: asyncio.Event = None    # сигнал перезагрузки пар
 
 # ─── КОМАНДЫ БОТА ─────────────────────────────────────────────────────────────
@@ -766,7 +767,9 @@ async def signal_loop(app: Application):
         except Exception as e:
             log.warning(f"Ошибка отправки {symbol}: {e}")
 
-        asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name))
+        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name))
+        g_background_tasks.add(vtask)
+        vtask.add_done_callback(g_background_tasks.discard)
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
                              trend_label: str | None, pair_name: str):
@@ -792,7 +795,7 @@ async def signal_loop(app: Application):
             adjusted_pct, verdict = classify_signal_outcome(direction, entry_price, price_now)
             checkpoints.append((minutes, adjusted_pct, verdict))
 
-        lines = [f"🔍 Проверка сигнала <code>{pair_name}</code> (тренд был: {trend_label or '—'})"]
+        lines = [f"🔍 Проверка сигнала <code>{pair_name}</code>  <i>Binance</i> (тренд был: {trend_label or '—'})"]
         for minutes, pct, verdict in checkpoints:
             if pct is None:
                 lines.append(f"{minutes}м: нет свежих данных")
