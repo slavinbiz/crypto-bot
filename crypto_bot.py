@@ -63,6 +63,11 @@ PRICE_CHANGE_PCT   = 0.3       # % пробоя тренда
 PUMP_PCT           = 6.0       # % изменения цены для сигнала
 PUMP_WINDOW        = 60        # за сколько минут считать памп
 
+# Проверка сигналов постфактум — отследить, пошла ли цена в сторону сигнала
+SIGNAL_CHECK_MINUTES       = [15, 60, 240]   # через сколько минут проверять цену
+SIGNAL_CHECK_DEADZONE_PCT  = 0.5             # % — в пределах этого считаем "около входа"
+SIGNAL_CHECK_STALE_MINUTES = 5               # свеча старше этого — считаем данные протухшими
+
 # Фильтры
 MIN_PAIR_AGE_DAYS  = 180        # минимальный возраст пары (6 мес)
 MIN_VOLUME_USDT    = 10_000_000 # минимальный объём за 24ч в USDT ($10 млн)
@@ -112,6 +117,21 @@ def calc_iiv(total_vols: np.ndarray) -> float:
     if avg_vol < 1e-9:
         return 0.0
     return current_vol / avg_vol
+
+
+def classify_signal_outcome(direction: str, entry_price: float, price_now: float,
+                             deadzone_pct: float = SIGNAL_CHECK_DEADZONE_PCT) -> tuple[float, str]:
+    """Сравнить цену с ценой входа и оценить, пошёл ли рынок в сторону сигнала.
+    direction: "long" (памп, ждём роста) или "short" (дамп, ждём падения)."""
+    raw_pct = (price_now - entry_price) / entry_price * 100
+    adjusted_pct = raw_pct if direction == "long" else -raw_pct
+    if adjusted_pct > deadzone_pct:
+        verdict = "🟢 в плюс"
+    elif adjusted_pct < -deadzone_pct:
+        verdict = "🔴 в минус"
+    else:
+        verdict = "⚪ около входа (б/у)"
+    return adjusted_pct, verdict
 
 
 def is_blacklisted(symbol: str) -> bool:
@@ -745,6 +765,44 @@ async def signal_loop(app: Application):
                 )
         except Exception as e:
             log.warning(f"Ошибка отправки {symbol}: {e}")
+
+        asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name))
+
+    async def verify_signal(symbol: str, direction: str, entry_price: float,
+                             trend_label: str | None, pair_name: str):
+        """Через SIGNAL_CHECK_MINUTES точек проверить, пошла ли цена в сторону сигнала."""
+        checkpoints = []
+        elapsed = 0
+        for minutes in SIGNAL_CHECK_MINUTES:
+            wait_s = minutes * 60 - elapsed
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            elapsed = minutes * 60
+
+            candles = candles_store.get(symbol)
+            is_stale = (
+                not candles
+                or datetime.now(timezone.utc) - candles[-1]["time"] > timedelta(minutes=SIGNAL_CHECK_STALE_MINUTES)
+            )
+            if is_stale:
+                checkpoints.append((minutes, None, None))
+                continue
+
+            price_now = candles[-1]["close"]
+            adjusted_pct, verdict = classify_signal_outcome(direction, entry_price, price_now)
+            checkpoints.append((minutes, adjusted_pct, verdict))
+
+        lines = [f"🔍 Проверка сигнала <code>{pair_name}</code> (тренд был: {trend_label or '—'})"]
+        for minutes, pct, verdict in checkpoints:
+            if pct is None:
+                lines.append(f"{minutes}м: нет свежих данных")
+            else:
+                lines.append(f"{minutes}м: {pct:+.2f}% — {verdict}")
+
+        try:
+            await bot.send_message(CHAT_ID, "\n".join(lines), parse_mode=ParseMode.HTML)
+        except Exception as e:
+            log.warning(f"Ошибка отправки проверки сигнала {symbol}: {e}")
 
     async def ws_listen(symbols: list[str]):
         """Подключиться к Binance Websocket и слушать свечи."""
