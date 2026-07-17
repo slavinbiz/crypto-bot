@@ -767,12 +767,14 @@ async def signal_loop(app: Application):
         except Exception as e:
             log.warning(f"Ошибка отправки {symbol}: {e}")
 
-        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name))
+        signal_time = candle["time"]
+
+        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name, signal_time))
         g_background_tasks.add(vtask)
         vtask.add_done_callback(g_background_tasks.discard)
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
-                             trend_label: str | None, pair_name: str):
+                             trend_label: str | None, pair_name: str, signal_time: datetime):
         """Через SIGNAL_CHECK_MINUTES точек проверить, пошла ли цена в сторону сигнала."""
         checkpoints = []
         elapsed = 0
@@ -795,7 +797,8 @@ async def signal_loop(app: Application):
             adjusted_pct, verdict = classify_signal_outcome(direction, entry_price, price_now)
             checkpoints.append((minutes, adjusted_pct, verdict))
 
-        lines = [f"🔍 Проверка сигнала <code>{pair_name}</code>  <i>Binance</i> (тренд был: {trend_label or '—'})"]
+        signal_time_str = signal_time.strftime("%H:%M UTC")
+        lines = [f"🔍 Проверка сигнала <code>{pair_name}</code> {signal_time_str}  <i>Binance</i> (тренд был: {trend_label or '—'})"]
         for minutes, pct, verdict in checkpoints:
             if pct is None:
                 lines.append(f"{minutes}м: нет свежих данных")
