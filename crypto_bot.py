@@ -827,13 +827,14 @@ async def signal_loop(app: Application):
             log.warning(f"Ошибка отправки {symbol}: {e}")
 
         signal_time = candle["time"]
+        signal_id = save_signal(symbol, pair_name, direction, price_now, signal_time, trend_verdict["label"])
 
-        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name, signal_time))
+        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name, signal_time, signal_id))
         g_background_tasks.add(vtask)
         vtask.add_done_callback(g_background_tasks.discard)
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
-                             trend_label: str | None, pair_name: str, signal_time: datetime):
+                             trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int):
         """Через SIGNAL_CHECK_MINUTES точек проверить, пошла ли цена в сторону сигнала."""
         checkpoints = []
         elapsed = 0
@@ -850,11 +851,13 @@ async def signal_loop(app: Application):
             )
             if is_stale:
                 checkpoints.append((minutes, None, None))
+                save_signal_check(signal_id, minutes, None, None)
                 continue
 
             price_now = candles[-1]["close"]
             adjusted_pct, verdict = classify_signal_outcome(direction, entry_price, price_now)
             checkpoints.append((minutes, adjusted_pct, verdict))
+            save_signal_check(signal_id, minutes, adjusted_pct, verdict)
 
         signal_time_str = signal_time.strftime("%H:%M UTC")
         lines = [f"🔍 Проверка сигнала <code>{pair_name}</code> {signal_time_str}  <i>Binance</i> (тренд был: {trend_label or '—'})"]
@@ -965,6 +968,7 @@ async def main():
     g_started_at  = time.time()
     g_reload_event = asyncio.Event()
     load_settings()
+    init_signals_db()
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("pairs",  cmd_pairs))
