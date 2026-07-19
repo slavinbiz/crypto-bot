@@ -12,6 +12,7 @@ import logging
 import os
 import time
 import json
+import sqlite3
 from datetime import datetime, timezone, timedelta
 
 import requests
@@ -143,6 +144,64 @@ def is_blacklisted(symbol: str) -> bool:
         if pattern in base:
             return True
     return False
+
+# ─── ЛОГ СИГНАЛОВ (SQLite, для анализа) ────────────────────────────────────────
+
+SIGNALS_DB = "/root/signals.db"
+
+
+def init_signals_db(db_path: str = SIGNALS_DB) -> None:
+    """Создать таблицы signals/signal_checks, если их ещё нет."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            pair_name TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            signal_time TEXT NOT NULL,
+            trend_label TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signal_checks (
+            signal_id INTEGER NOT NULL REFERENCES signals(id),
+            minutes INTEGER NOT NULL,
+            pct REAL,
+            verdict TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_signal(symbol: str, pair_name: str, direction: str, entry_price: float,
+                 signal_time: datetime, trend_label: str | None,
+                 db_path: str = SIGNALS_DB) -> int:
+    """Записать новый сигнал, вернуть его id."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO signals (symbol, pair_name, direction, entry_price, signal_time, trend_label) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (symbol, pair_name, direction, entry_price, signal_time.isoformat(), trend_label)
+    )
+    conn.commit()
+    signal_id = cur.lastrowid
+    conn.close()
+    return signal_id
+
+
+def save_signal_check(signal_id: int, minutes: int, pct: float | None, verdict: str | None,
+                       db_path: str = SIGNALS_DB) -> None:
+    """Записать результат проверки сигнала через N минут."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO signal_checks (signal_id, minutes, pct, verdict) VALUES (?, ?, ?, ?)",
+        (signal_id, minutes, pct, verdict)
+    )
+    conn.commit()
+    conn.close()
 
 # ─── ЛОГИРОВАНИЕ ──────────────────────────────────────────────────────────────
 
