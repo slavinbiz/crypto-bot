@@ -28,6 +28,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.constants import ParseMode
 
 import ema_trend
+import ema_pullback
 
 def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None, trend_label=None) -> str:
     """Формирует caption без конфликтов с Markdown."""
@@ -287,6 +288,32 @@ def fetch_trend_verdict(symbol: str, direction: str, price: float) -> dict:
     except Exception as e:
         log.warning(f"Не удалось получить тренд-вердикт для {symbol}: {e}")
         return {"verdict": "unknown", "label": "⚪ Не удалось проверить", "distance_pct": None}
+
+
+def fetch_pullback_signal(symbol: str, direction: str, price: float) -> dict | None:
+    """Обёртка над ema_pullback.build_pullback_signal с сетевым запросом недельных свечей."""
+    try:
+        weekly_candles = get_klines(symbol, ema_pullback.WEEKLY_INTERVAL, ema_pullback.WEEKLY_LIMIT, timeout=4)
+        return ema_pullback.build_pullback_signal(direction, price, weekly_candles)
+    except Exception as e:
+        log.warning(f"Не удалось получить контр-сигнал для {symbol}: {e}")
+        return None
+
+
+def fmt_pullback_caption(pair_name: str, pullback: dict) -> str:
+    direction_label = "🟢 LONG" if pullback["direction"] == "long" else "🔴 SHORT"
+    lines = [
+        f"🎯 Контр-сигнал <code>{pair_name}</code>  <i>Binance</i>  недельный EMA | {direction_label}",
+        "",
+        f"ВХОД: <code>{pullback['entry']:.5g}</code> (лимитка, EMA{pullback['entry_period']}(W))",
+        f"СТОП: <code>{pullback['stop']:.5g}</code>",
+        f"ТЕЙК: <code>{pullback['take']:.5g}</code>",
+        "",
+        "Уровни:",
+    ]
+    for period in sorted(pullback["emas"]):
+        lines.append(f"• EMA{period}(W): <code>{pullback['emas'][period]:.5g}</code>")
+    return "\n".join(lines)
 
 
 def get_pair_age_days(symbol: str) -> float:
@@ -832,6 +859,20 @@ async def signal_loop(app: Application):
         vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name, signal_time, signal_id))
         g_background_tasks.add(vtask)
         vtask.add_done_callback(g_background_tasks.discard)
+
+        ptask = asyncio.create_task(send_pullback_signal(symbol, direction, price_now, pair_name))
+        g_background_tasks.add(ptask)
+        ptask.add_done_callback(g_background_tasks.discard)
+
+    async def send_pullback_signal(symbol: str, direction: str, price: float, pair_name: str):
+        """Контр-сигнал по недельным EMA против направления памп/дамп. Тихо ничего не шлёт, если структуры не хватает."""
+        pullback = await asyncio.to_thread(fetch_pullback_signal, symbol, direction, price)
+        if pullback is None:
+            return
+        try:
+            await bot.send_message(CHAT_ID, fmt_pullback_caption(pair_name, pullback), parse_mode=ParseMode.HTML)
+        except Exception as e:
+            log.warning(f"Ошибка отправки контр-сигнала {symbol}: {e}")
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
                              trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int):
