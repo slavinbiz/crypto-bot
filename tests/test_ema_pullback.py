@@ -54,7 +54,7 @@ def test_build_pullback_signal_short_counter_to_pump():
     closes = list(np.linspace(1.0, 2.0, 40))
     candles = [{"close": c} for c in closes]
     price = 1.7
-    stop_candles = make_stop_candles([(1.65, 1.75), (1.68, 1.80), (1.66, 1.72)])  # ближайший хай 1.80
+    stop_candles = make_stop_candles([(1.65, 1.90), (1.68, 1.95), (1.66, 1.92)])  # ближайший хай 1.95, выше входа (EMA14≈1.83)
 
     result = build_pullback_signal("long", price=price, weekly_candles=candles, stop_candles=stop_candles)
 
@@ -64,7 +64,25 @@ def test_build_pullback_signal_short_counter_to_pump():
     assert result["stop"] > result["entry"]
     assert result["take"] == pytest.approx(result["entry"] * 0.97)
     # стоп = ближайший хай из lookback-свечей плюс буфер 2%
-    assert result["stop"] == pytest.approx(1.80 * 1.02)
+    assert result["stop"] == pytest.approx(1.95 * 1.02)
+
+
+def test_build_pullback_signal_stop_never_crosses_entry_when_far_from_price():
+    # Вход (EMA14) далеко от текущей цены (пампнули, откат ещё не начался) —
+    # недавний внутридневной хай/лой лежит ближе к цене, чем к EMA14, и без клампа
+    # стоп оказывался ПО ТУ ЖЕ сторону от входа, что и тейк (баг из реального сигнала HEMI/USDT).
+    closes = list(np.linspace(1.0, 2.0, 40))
+    candles = [{"close": c} for c in closes]
+    price = 1.0  # намного ниже EMA14/EMA7 — пара только что пампнула
+
+    stop_candles = make_stop_candles([(1.01, 1.05), (1.02, 1.06), (1.0, 1.04)])  # хай ~1.06, много ниже входа
+
+    result = build_pullback_signal("long", price=price, weekly_candles=candles, stop_candles=stop_candles)
+
+    assert result is not None
+    assert result["direction"] == "short"
+    assert result["stop"] > result["entry"]  # стоп обязан остаться над входом
+    assert result["take"] < result["entry"]
 
 
 def test_build_pullback_signal_none_when_only_one_ema_on_pullback_side():

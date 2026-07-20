@@ -63,9 +63,14 @@ def build_pullback_signal(
     stop_level = nearest_stop_level(stop_candles, counter_direction)
 
     if counter_direction == "long":
+        # Стоп обязан быть ниже входа: если недавний лой ещё не опускался так низко
+        # (вход — далёкий недельный уровень, цена туда ещё не доходила), берём вход как базу.
+        stop_level = min(stop_level, entry)
         stop = stop_level * (1 - STOP_BUFFER_PCT / 100)
         take = entry * (1 + TAKE_PROFIT_PCT / 100)
     else:
+        # Симметрично для шорта: стоп обязан быть выше входа.
+        stop_level = max(stop_level, entry)
         stop = stop_level * (1 + STOP_BUFFER_PCT / 100)
         take = entry * (1 - TAKE_PROFIT_PCT / 100)
 
