@@ -362,6 +362,10 @@ def has_enough_volume(ticker: dict) -> bool:
 IIV_PERIOD         = 20        # период для расчёта среднего объёма
 IIV_HOT            = 5.0       # порог — объём в X раз выше среднего = сигнал
 
+# "Тягучие" пампы/дампы (движение растянуто без всплеска объёма в одной свече, как ALICE 20.07):
+# если цена ушла в STRONG_PUMP_MULTIPLIER раз дальше базового порога — шлём сигнал и без IIV-спайка
+STRONG_PUMP_MULTIPLIER = 2.0
+
 # ─── СИГНАЛ ───────────────────────────────────────────────────────────────────
 
 class SignalState:
@@ -389,13 +393,17 @@ class SignalState:
         price_ago = closes[-window - 1]
         pump_pct  = (price - price_ago) / price_ago * 100
 
+        # Тягучее движение без спайка объёма — пропускаем через IIV-гейт,
+        # если цена ушла вдвое дальше базового порога
+        is_strong_move = abs(pump_pct) >= PUMP_PCT * STRONG_PUMP_MULTIPLIER
+
         # Динамический порог: если уже был сигнал — считаем % от той цены
         if self.last_signal_price > 0:
             pct_from_last = (price - self.last_signal_price) / self.last_signal_price * 100
             if abs(pct_from_last) < PUMP_PCT:
                 return False, "", rsi
 
-        if pump_pct >= PUMP_PCT and has_vol_spike:
+        if pump_pct >= PUMP_PCT and (has_vol_spike or is_strong_move):
             # Фандинг-фильтр: пропускаем памп если лонги перегружены
             if FUNDING_FILTER and funding is not None and funding > FUNDING_MAX_LONG:
                 log.info(f"Памп пропущен (фандинг {funding:+.4f}% > {FUNDING_MAX_LONG}%)")
@@ -411,7 +419,7 @@ class SignalState:
             self.last_signal_price = price
             return True, desc, rsi
 
-        if pump_pct <= -PUMP_PCT and has_vol_spike:
+        if pump_pct <= -PUMP_PCT and (has_vol_spike or is_strong_move):
             # Фандинг-фильтр: пропускаем дамп если шорты перегружены
             if FUNDING_FILTER and funding is not None and funding < FUNDING_MAX_SHORT:
                 log.info(f"Дамп пропущен (фандинг {funding:+.4f}% < {FUNDING_MAX_SHORT}%)")
