@@ -1,28 +1,11 @@
 import numpy as np
 import pytest
 
-from ema_pullback import calc_weekly_emas, build_pullback_signal, EMA_PERIODS
+from ema_pullback import calc_weekly_emas, build_pullback_signal, EMA_PERIODS, EMA_WARMUP_FACTOR
 
 
 def make_candles(n: int, start: float = 1.0, step: float = 0.01) -> list[dict]:
     return [{"close": start + i * step} for i in range(n)]
-
-
-def test_calc_weekly_emas_skips_periods_without_enough_data():
-    closes = np.array([c["close"] for c in make_candles(20)])
-    emas = calc_weekly_emas(closes)
-    assert set(emas.keys()) == {7, 14}  # 28 не хватает свечей
-
-
-def test_calc_weekly_emas_all_periods_with_enough_data():
-    closes = np.array([c["close"] for c in make_candles(40)])
-    emas = calc_weekly_emas(closes)
-    assert set(emas.keys()) == set(EMA_PERIODS)
-
-
-def test_build_pullback_signal_returns_none_with_too_few_candles():
-    candles = make_weekly_candles([c["close"] for c in make_candles(10)])
-    assert build_pullback_signal("short", price=1.5, weekly_candles=candles) is None
 
 
 def make_weekly_candles(closes: list[float], overrides: dict[int, dict] | None = None) -> list[dict]:
@@ -38,48 +21,70 @@ def make_weekly_candles(closes: list[float], overrides: dict[int, dict] | None =
     return candles
 
 
+def test_calc_weekly_emas_skips_periods_without_enough_warmup():
+    # 30 свечей: хватает на разгон EMA7 (21) и EMA14 (42? нет — 30<42, тоже недостаточно)
+    # так что при 30 свечах остаётся только EMA7 (нужно >= 7*factor = 21)
+    closes = np.array([c["close"] for c in make_candles(30)])
+    emas = calc_weekly_emas(closes)
+    assert set(emas.keys()) == {7}
+
+
+def test_calc_weekly_emas_all_periods_with_enough_warmup():
+    # 28 * EMA_WARMUP_FACTOR свечей хватает на разгон всех трёх периодов
+    closes = np.array([c["close"] for c in make_candles(28 * EMA_WARMUP_FACTOR)])
+    emas = calc_weekly_emas(closes)
+    assert set(emas.keys()) == set(EMA_PERIODS)
+
+
+def test_build_pullback_signal_returns_none_with_too_few_candles():
+    candles = make_weekly_candles([c["close"] for c in make_candles(10)])
+    assert build_pullback_signal("short", price=1.5, weekly_candles=candles) is None
+
+
 def test_build_pullback_signal_long_counter_to_dump():
-    # Падающий ряд: EMA7≈1.08, EMA14≈1.17, EMA28≈1.35 — берём цену между EMA14 и EMA28,
-    # вход — EMA14 (1.1667)
-    closes = list(np.linspace(2.0, 1.0, 40))
+    # Падающий ряд, 100 недельных свечей (как в проде): EMA7≈1.030, EMA14≈1.066, EMA28≈1.136.
+    # Цена между EMA14 и EMA28 — вход EMA14
+    closes = list(np.linspace(2.0, 1.0, 100))
     candles = make_weekly_candles(closes, {
-        0: {"low": 1.05},
-        1: {"low": 1.10},
-        2: {"low": 1.08},
+        0: {"low": 1.02},
+        1: {"low": 1.05},
+        2: {"low": 1.03},
     })
-    price = 1.2
+    price = 1.10
 
     result = build_pullback_signal("short", price=price, weekly_candles=candles)
 
     assert result is not None
     assert result["direction"] == "long"
+    assert result["entry_period"] == 14
     assert result["entry"] < price
     assert result["stop"] < result["entry"]
     assert result["take"] == pytest.approx(result["entry"] * 1.03)
     # стоп = ближайший (наибольший) недельный лой ДАЛЬШЕ входа минус буфер 2%
-    assert result["stop"] == pytest.approx(1.10 * 0.98)
+    assert result["stop"] == pytest.approx(1.05 * 0.98)
 
 
 def test_build_pullback_signal_short_counter_to_pump():
-    # Растущий ряд: EMA7≈1.92, EMA14≈1.83, EMA28≈1.65 — берём цену между EMA28 и EMA14,
-    # вход — EMA14 (1.8333)
-    closes = list(np.linspace(1.0, 2.0, 40))
+    # Растущий ряд, 100 свечей: EMA7≈1.970, EMA14≈1.934, EMA28≈1.864.
+    # Цена между EMA28 и EMA14 — вход EMA14
+    closes = list(np.linspace(1.0, 2.0, 100))
     candles = make_weekly_candles(closes, {
-        0: {"high": 1.90},
+        0: {"high": 1.94},
         1: {"high": 1.95},
-        2: {"high": 1.92},
+        2: {"high": 1.96},
     })
-    price = 1.7
+    price = 1.90
 
     result = build_pullback_signal("long", price=price, weekly_candles=candles)
 
     assert result is not None
     assert result["direction"] == "short"
+    assert result["entry_period"] == 14
     assert result["entry"] > price
     assert result["stop"] > result["entry"]
     assert result["take"] == pytest.approx(result["entry"] * 0.97)
     # стоп = ближайший (наименьший) недельный хай ДАЛЬШЕ входа плюс буфер 2%
-    assert result["stop"] == pytest.approx(1.90 * 1.02)
+    assert result["stop"] == pytest.approx(1.94 * 1.02)
 
 
 def test_build_pullback_signal_works_with_only_one_ema_if_real_high_exists():
@@ -87,24 +92,24 @@ def test_build_pullback_signal_works_with_only_one_ema_if_real_high_exists():
     # EMA7/14 уже ниже цены) — раньше гейт "минимум 2 EMA" резал такой сигнал.
     # Но если в недельной истории есть настоящий хай дальше входа (EMA28) —
     # стоп есть за что поставить, сигнал должен пройти.
-    closes = [5.0] * 12 + list(np.linspace(5.0, 2.0, 28))
-    candles = make_weekly_candles(closes, {3: {"high": 3.5}})  # реальный хай чуть выше EMA28
-    price = 2.71  # между EMA14(~2.71) и EMA28(~3.37) — только EMA28 выше цены
+    closes = [5.0] * 30 + list(np.linspace(5.0, 2.0, 70))  # EMA7≈2.13, EMA14≈2.28, EMA28≈2.58
+    candles = make_weekly_candles(closes, {5: {"high": 2.7}})  # реальный хай чуть выше EMA28
+    price = 2.30  # между EMA14 и EMA28 — только EMA28 выше цены
 
     result = build_pullback_signal("long", price=price, weekly_candles=candles)
 
     assert result is not None
     assert result["direction"] == "short"
-    assert result["entry"] == pytest.approx(3.3686943974321304)
-    assert result["stop"] == pytest.approx(3.5 * 1.02)
+    assert result["entry_period"] == 28
+    assert result["stop"] == pytest.approx(2.7 * 1.02)
 
 
 def test_build_pullback_signal_none_when_no_real_level_beyond_entry():
     # Тот же вход (EMA14), что и в test_..._long_counter_to_dump, но в истории
     # нет ни одной недельной свечи с лоем ниже входа — стоп поставить не за что.
-    closes = list(np.linspace(2.0, 1.0, 40))
+    closes = list(np.linspace(2.0, 1.0, 100))
     candles = make_weekly_candles(closes)  # без overrides — все low = 1e9 (никогда не ниже входа)
-    price = 1.2
+    price = 1.10
 
     result = build_pullback_signal("short", price=price, weekly_candles=candles)
     assert result is None

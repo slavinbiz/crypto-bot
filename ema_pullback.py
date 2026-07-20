@@ -12,15 +12,26 @@ import numpy as np
 from ema_trend import calc_ema
 
 WEEKLY_INTERVAL = "1w"
-WEEKLY_LIMIT = 40
+WEEKLY_LIMIT = 100
 EMA_PERIODS = [7, 14, 28]
 STOP_BUFFER_PCT = 2.0
 TAKE_PROFIT_PCT = 3.0
 
+# calc_ema() сажает EMA на SMA первых `period` свечей, дальше досчитывает по остатку —
+# без разгона минимум в EMA_WARMUP_FACTOR раз больше периода значение остаётся смещено
+# к затравке (проверено на реальных данных: EMA28 по 40 свечам расходился с TradingView
+# на ~17%, по 84+ — совпадал).
+EMA_WARMUP_FACTOR = 3
+
 
 def calc_weekly_emas(closes: np.ndarray) -> dict[int, float]:
-    """EMA по каждому периоду, для которого хватает недельных свечей. Недостающие пропускаются."""
-    return {period: calc_ema(closes, period) for period in EMA_PERIODS if len(closes) >= period}
+    """EMA по каждому периоду, для которого хватает недельных свечей на разгон (period * EMA_WARMUP_FACTOR).
+    Недостающие пропускаются — не отдаём непрогретое (смещённое к затравке) значение."""
+    return {
+        period: calc_ema(closes, period)
+        for period in EMA_PERIODS
+        if len(closes) >= period * EMA_WARMUP_FACTOR
+    }
 
 
 def nearest_weekly_stop_level(weekly_candles: list[dict], entry: float, counter_direction: str) -> float | None:
