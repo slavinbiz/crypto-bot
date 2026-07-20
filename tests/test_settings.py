@@ -1,6 +1,5 @@
 import json
 import crypto_bot
-import ema_pullback
 import ema_trend
 
 
@@ -22,23 +21,3 @@ def test_save_settings_writes_ema_threshold(tmp_path, monkeypatch):
         assert saved["EMA_DISTANCE_THRESHOLD_PCT"] == 0.8
     finally:
         ema_trend.EMA_DISTANCE_THRESHOLD_PCT = 0.5
-
-
-def test_load_settings_reads_stop_lookback_interval(tmp_path, monkeypatch):
-    settings_file = tmp_path / "bot_settings.json"
-    settings_file.write_text(json.dumps({"STOP_LOOKBACK_INTERVAL": "30m"}))
-    monkeypatch.setattr(crypto_bot, "SETTINGS_FILE", str(settings_file))
-    crypto_bot.load_settings()
-    assert ema_pullback.STOP_LOOKBACK_INTERVAL == "30m"
-
-
-def test_save_settings_writes_stop_lookback_interval(tmp_path, monkeypatch):
-    settings_file = tmp_path / "bot_settings.json"
-    monkeypatch.setattr(crypto_bot, "SETTINGS_FILE", str(settings_file))
-    ema_pullback.STOP_LOOKBACK_INTERVAL = "30m"
-    try:
-        crypto_bot.save_settings()
-        saved = json.loads(settings_file.read_text())
-        assert saved["STOP_LOOKBACK_INTERVAL"] == "30m"
-    finally:
-        ema_pullback.STOP_LOOKBACK_INTERVAL = "1h"

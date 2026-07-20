@@ -4,18 +4,17 @@ import crypto_bot
 import ema_pullback
 
 
-def fake_klines_by_interval(weekly_closes, stop_low=1.10, stop_high=1.30):
-    def fake_klines(symbol, interval, limit, timeout=10):
-        if interval == ema_pullback.WEEKLY_INTERVAL:
-            return [{"close": c} for c in weekly_closes]
-        return [{"low": stop_low, "high": stop_high} for _ in range(limit)]
-    return fake_klines
+def fake_klines(weekly_closes):
+    def fake(symbol, interval, limit, timeout=10):
+        assert interval == ema_pullback.WEEKLY_INTERVAL
+        return [{"close": c, "high": c, "low": c} for c in weekly_closes]
+    return fake
 
 
 def test_fetch_pullback_signal_success(monkeypatch):
     closes = list(np.linspace(2.0, 1.0, 40))
 
-    monkeypatch.setattr(crypto_bot, "get_klines", fake_klines_by_interval(closes))
+    monkeypatch.setattr(crypto_bot, "get_klines", fake_klines(closes))
     result = crypto_bot.fetch_pullback_signal("BTCUSDT", "short", price=1.2)
 
     assert result is not None
@@ -33,10 +32,10 @@ def test_fetch_pullback_signal_returns_none_on_error(monkeypatch):
 
 
 def test_fetch_pullback_signal_returns_none_when_not_enough_structure(monkeypatch):
-    def fake_klines(symbol, interval, limit, timeout=10):
-        return [{"close": 1.0} for _ in range(3)]
+    def fake(symbol, interval, limit, timeout=10):
+        return [{"close": 1.0, "high": 1.0, "low": 1.0} for _ in range(3)]
 
-    monkeypatch.setattr(crypto_bot, "get_klines", fake_klines)
+    monkeypatch.setattr(crypto_bot, "get_klines", fake)
     result = crypto_bot.fetch_pullback_signal("BTCUSDT", "short", price=1.2)
 
     assert result is None
@@ -45,30 +44,12 @@ def test_fetch_pullback_signal_returns_none_when_not_enough_structure(monkeypatc
 def test_fetch_pullback_signal_uses_weekly_interval(monkeypatch):
     calls = []
 
-    def fake_klines(symbol, interval, limit, timeout=10):
+    def fake(symbol, interval, limit, timeout=10):
         calls.append((interval, limit))
-        if interval == ema_pullback.WEEKLY_INTERVAL:
-            return [{"close": c} for c in np.linspace(2.0, 1.0, 40)]
-        return [{"low": 1.10, "high": 1.30} for _ in range(limit)]
+        return [{"close": c, "high": c, "low": c} for c in np.linspace(2.0, 1.0, 40)]
 
-    monkeypatch.setattr(crypto_bot, "get_klines", fake_klines)
+    monkeypatch.setattr(crypto_bot, "get_klines", fake)
     crypto_bot.fetch_pullback_signal("BTCUSDT", "short", price=1.2)
 
     assert ("1w", 40) in calls
-
-
-def test_fetch_pullback_signal_uses_stop_lookback_interval(monkeypatch):
-    calls = []
-
-    def fake_klines(symbol, interval, limit, timeout=10):
-        calls.append((interval, limit))
-        if interval == ema_pullback.WEEKLY_INTERVAL:
-            return [{"close": c} for c in np.linspace(2.0, 1.0, 40)]
-        return [{"low": 1.10, "high": 1.30} for _ in range(limit)]
-
-    monkeypatch.setattr(crypto_bot, "get_klines", fake_klines)
-    crypto_bot.fetch_pullback_signal("BTCUSDT", "short", price=1.2)
-
-    stop_interval = ema_pullback.STOP_LOOKBACK_INTERVAL
-    stop_limit = ema_pullback.STOP_LOOKBACK_CANDLES[stop_interval]
-    assert (stop_interval, stop_limit) in calls
+    assert len(calls) == 1  # больше не дёргаем отдельный внутридневной запрос под стоп
