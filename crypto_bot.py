@@ -885,6 +885,10 @@ async def signal_loop(app: Application):
         pullback = await asyncio.to_thread(fetch_pullback_signal, symbol, direction, price)
         if pullback is None:
             return
+        log.info(
+            f"Контр-сигнал: {symbol} — {pullback['direction'].upper()} "
+            f"вход={pullback['entry']:.5g} стоп={pullback['stop']:.5g} тейк={pullback['take']:.5g}"
+        )
         try:
             await bot.send_message(CHAT_ID, fmt_pullback_caption(pair_name, pullback), parse_mode=ParseMode.HTML)
         except Exception as e:
