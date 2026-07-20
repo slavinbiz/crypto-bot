@@ -291,10 +291,14 @@ def fetch_trend_verdict(symbol: str, direction: str, price: float) -> dict:
 
 
 def fetch_pullback_signal(symbol: str, direction: str, price: float) -> dict | None:
-    """Обёртка над ema_pullback.build_pullback_signal с сетевым запросом недельных свечей."""
+    """Обёртка над ema_pullback.build_pullback_signal с сетевым запросом недельных
+    и внутридневных (под стоп) свечей."""
     try:
         weekly_candles = get_klines(symbol, ema_pullback.WEEKLY_INTERVAL, ema_pullback.WEEKLY_LIMIT, timeout=4)
-        return ema_pullback.build_pullback_signal(direction, price, weekly_candles)
+        stop_interval = ema_pullback.STOP_LOOKBACK_INTERVAL
+        stop_limit = ema_pullback.STOP_LOOKBACK_CANDLES[stop_interval]
+        stop_candles = get_klines(symbol, stop_interval, stop_limit, timeout=4)
+        return ema_pullback.build_pullback_signal(direction, price, weekly_candles, stop_candles)
     except Exception as e:
         log.warning(f"Не удалось получить контр-сигнал для {symbol}: {e}")
         return None
@@ -547,7 +551,10 @@ def load_settings():
             ema_trend.EMA_DISTANCE_THRESHOLD_PCT = s.get(
                 "EMA_DISTANCE_THRESHOLD_PCT", ema_trend.EMA_DISTANCE_THRESHOLD_PCT
             )
-        log.info(f"Настройки загружены: vol=${MIN_VOLUME_USDT//1_000_000}M pump={PUMP_PCT}% iiv={IIV_HOT}x age={MIN_PAIR_AGE_DAYS//30}мес ema_dist={ema_trend.EMA_DISTANCE_THRESHOLD_PCT}%")
+            ema_pullback.STOP_LOOKBACK_INTERVAL = s.get(
+                "STOP_LOOKBACK_INTERVAL", ema_pullback.STOP_LOOKBACK_INTERVAL
+            )
+        log.info(f"Настройки загружены: vol=${MIN_VOLUME_USDT//1_000_000}M pump={PUMP_PCT}% iiv={IIV_HOT}x age={MIN_PAIR_AGE_DAYS//30}мес ema_dist={ema_trend.EMA_DISTANCE_THRESHOLD_PCT}% stop_lookback={ema_pullback.STOP_LOOKBACK_INTERVAL}")
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -559,6 +566,7 @@ def save_settings():
             "IIV_HOT":           IIV_HOT,
             "MIN_PAIR_AGE_DAYS": MIN_PAIR_AGE_DAYS,
             "EMA_DISTANCE_THRESHOLD_PCT": ema_trend.EMA_DISTANCE_THRESHOLD_PCT,
+            "STOP_LOOKBACK_INTERVAL": ema_pullback.STOP_LOOKBACK_INTERVAL,
         }, f)
 
 # ─── ГЛОБАЛЬНОЕ СОСТОЯНИЕ (для команд) ───────────────────────────────────────
