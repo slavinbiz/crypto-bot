@@ -976,9 +976,13 @@ async def signal_loop(app: Application):
         ptask.add_done_callback(g_background_tasks.discard)
 
     async def send_pullback_signal(symbol: str, direction: str, price: float, pair_name: str):
-        """Контр-сигнал по недельным EMA против направления памп/дамп. Тихо ничего не шлёт, если структуры не хватает."""
+        """Контр-сигнал по недельным EMA против направления памп/дамп. Тихо ничего не шлёт, если структуры
+        не хватает или для этой пары+направления уже есть активный трекинг."""
         pullback = await asyncio.to_thread(fetch_pullback_signal, symbol, direction, price)
         if pullback is None:
+            return
+        already_tracking = await asyncio.to_thread(has_active_pullback_tracking, symbol, pullback["direction"])
+        if already_tracking:
             return
         log.info(
             f"Контр-сигнал: {symbol} — {pullback['direction'].upper()} "
@@ -988,6 +992,11 @@ async def signal_loop(app: Application):
             await bot.send_message(CHAT_ID, fmt_pullback_caption(pair_name, pullback), parse_mode=ParseMode.HTML)
         except Exception as e:
             log.warning(f"Ошибка отправки контр-сигнала {symbol}: {e}")
+            return
+        await asyncio.to_thread(
+            save_pullback_tracking, symbol, pair_name, pullback["direction"], pullback["entry_period"],
+            pullback["entry"], pullback["stop"], pullback["take"], datetime.now(timezone.utc)
+        )
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
                              trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int):
