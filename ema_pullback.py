@@ -112,3 +112,9 @@ def build_pullback_signal(direction: str, price: float, weekly_candles: list[dic
     entry_period = pick_entry(side, key=lambda p: side[p])
 
     return build_pullback_signal_for_period(counter_direction, weekly_candles, entry_period)
+
+
+def next_pullback_period(current_period: int) -> int | None:
+    """Следующий период в цепочке EMA_PERIODS после текущего. None — если текущий последний."""
+    idx = EMA_PERIODS.index(current_period)
+    return EMA_PERIODS[idx + 1] if idx + 1 < len(EMA_PERIODS) else None

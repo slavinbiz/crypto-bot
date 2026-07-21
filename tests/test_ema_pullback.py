@@ -3,7 +3,7 @@ import pytest
 
 from ema_pullback import (
     calc_weekly_emas, build_pullback_signal, build_pullback_signal_for_period,
-    EMA_PERIODS, EMA_WARMUP_FACTOR,
+    next_pullback_period, EMA_PERIODS, EMA_WARMUP_FACTOR,
 )
 
 
@@ -166,3 +166,12 @@ def test_build_pullback_signal_for_period_none_when_no_real_level_beyond_entry()
     result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
 
     assert result is None
+
+
+def test_next_pullback_period_returns_next_in_chain():
+    assert next_pullback_period(7) == 14
+    assert next_pullback_period(14) == 28
+
+
+def test_next_pullback_period_none_after_last():
+    assert next_pullback_period(28) is None
