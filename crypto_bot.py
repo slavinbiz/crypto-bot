@@ -998,6 +998,60 @@ async def signal_loop(app: Application):
             pullback["entry"], pullback["stop"], pullback["take"], datetime.now(timezone.utc)
         )
 
+    async def check_pullback_tracking():
+        """Раз в сутки — проверяем все активные трекинги контр-сигналов на продвижение/отмену/завершение."""
+        rows = await asyncio.to_thread(get_active_pullback_tracking)
+        for row in rows:
+            result = await asyncio.to_thread(
+                fetch_tracking_update, row["symbol"], row["direction"], row["entry_period"], row["entry"], row["stop"]
+            )
+            if result is None or result["decision"] == "none":
+                continue
+
+            now_dt = datetime.now(timezone.utc)
+
+            if result["decision"] == "invalidate":
+                await asyncio.to_thread(
+                    update_pullback_tracking, row["id"], row["entry_period"], row["entry"], row["stop"],
+                    row["take"], "invalidated", now_dt
+                )
+                try:
+                    await bot.send_message(
+                        CHAT_ID,
+                        f"🔻 Сетап <code>{row['pair_name']}</code> сломан — дневное закрытие "
+                        f"{result['daily_close']:.5g} пробило стоп {row['stop']:.5g}",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    log.warning(f"Ошибка отправки отмены трекинга {row['symbol']}: {e}")
+                continue
+
+            if result["decision"] == "done":
+                await asyncio.to_thread(
+                    update_pullback_tracking, row["id"], row["entry_period"], row["entry"], row["stop"],
+                    row["take"], "done", now_dt
+                )
+                try:
+                    await bot.send_message(
+                        CHAT_ID,
+                        f"🏁 <code>{row['pair_name']}</code> прошёл все EMA, дальше пробивать нечего",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    log.warning(f"Ошибка отправки завершения трекинга {row['symbol']}: {e}")
+                continue
+
+            # decision == "advance"
+            pullback = result["pullback"]
+            await asyncio.to_thread(
+                update_pullback_tracking, row["id"], pullback["entry_period"], pullback["entry"], pullback["stop"],
+                pullback["take"], "active", now_dt
+            )
+            try:
+                await bot.send_message(CHAT_ID, fmt_pullback_caption(row["pair_name"], pullback), parse_mode=ParseMode.HTML)
+            except Exception as e:
+                log.warning(f"Ошибка отправки продвижения трекинга {row['symbol']}: {e}")
+
     async def verify_signal(symbol: str, direction: str, entry_price: float,
                              trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int):
         """Через SIGNAL_CHECK_MINUTES точек проверить, пошла ли цена в сторону сигнала."""
@@ -1063,6 +1117,7 @@ async def signal_loop(app: Application):
         nonlocal valid_symbols, tickers_24h
         last_funding = time.time()
         last_full    = time.time()
+        last_pullback_date = None
 
         while True:
             # Ждём события перезагрузки или таймаут 60с
@@ -1120,6 +1175,15 @@ async def signal_loop(app: Application):
                     last_full = now
                 except Exception as e:
                     log.warning(f"Ошибка обновления: {e}")
+
+            # Раз в сутки, после закрытия дневной свечи (00:05 UTC) — проверяем трекинг контр-сигналов
+            now_dt = datetime.now(timezone.utc)
+            if (now_dt.hour, now_dt.minute) >= (0, 5) and last_pullback_date != now_dt.date():
+                try:
+                    await check_pullback_tracking()
+                    last_pullback_date = now_dt.date()
+                except Exception as e:
+                    log.warning(f"Ошибка проверки трекинга контр-сигналов: {e}")
 
     # Запускаем websocket и refresh параллельно
     await asyncio.gather(
