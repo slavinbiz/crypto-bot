@@ -3,7 +3,7 @@ import pytest
 
 from ema_pullback import (
     calc_weekly_emas, build_pullback_signal, build_pullback_signal_for_period,
-    next_pullback_period, EMA_PERIODS, EMA_WARMUP_FACTOR,
+    next_pullback_period, evaluate_tracking, EMA_PERIODS, EMA_WARMUP_FACTOR,
 )
 
 
@@ -175,3 +175,35 @@ def test_next_pullback_period_returns_next_in_chain():
 
 def test_next_pullback_period_none_after_last():
     assert next_pullback_period(28) is None
+
+
+def test_evaluate_tracking_long_advance_when_close_above_entry():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=101.0) == "advance"
+
+
+def test_evaluate_tracking_long_invalidate_when_close_below_stop():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=94.0) == "invalidate"
+
+
+def test_evaluate_tracking_long_none_between_stop_and_entry():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=97.0) == "none"
+
+
+def test_evaluate_tracking_long_boundary_at_entry_is_none():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=100.0) == "none"
+
+
+def test_evaluate_tracking_long_boundary_at_stop_is_none():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=95.0) == "none"
+
+
+def test_evaluate_tracking_short_advance_when_close_below_entry():
+    assert evaluate_tracking("short", entry=100.0, stop=105.0, daily_close=99.0) == "advance"
+
+
+def test_evaluate_tracking_short_invalidate_when_close_above_stop():
+    assert evaluate_tracking("short", entry=100.0, stop=105.0, daily_close=106.0) == "invalidate"
+
+
+def test_evaluate_tracking_short_none_between_entry_and_stop():
+    assert evaluate_tracking("short", entry=100.0, stop=105.0, daily_close=103.0) == "none"

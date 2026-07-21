@@ -118,3 +118,21 @@ def next_pullback_period(current_period: int) -> int | None:
     """Следующий период в цепочке EMA_PERIODS после текущего. None — если текущий последний."""
     idx = EMA_PERIODS.index(current_period)
     return EMA_PERIODS[idx + 1] if idx + 1 < len(EMA_PERIODS) else None
+
+
+def evaluate_tracking(direction: str, entry: float, stop: float, daily_close: float) -> str:
+    """Что делать с активным трекингом контр-сигнала по дневному закрытию:
+    "advance" — закрытие прошло дальше входа (пора ждать отскока от следующей EMA),
+    "invalidate" — закрытие пробило стоп (структура сломана, трекинг отменяем),
+    "none" — ничего не изменилось, продолжаем ждать."""
+    if direction == "long":
+        if daily_close < stop:
+            return "invalidate"
+        if daily_close > entry:
+            return "advance"
+    else:
+        if daily_close > stop:
+            return "invalidate"
+        if daily_close < entry:
+            return "advance"
+    return "none"
