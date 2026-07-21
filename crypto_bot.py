@@ -369,6 +369,40 @@ def fetch_pullback_signal(symbol: str, direction: str, price: float) -> dict | N
         return None
 
 
+def fetch_tracking_update(symbol: str, direction: str, entry_period: int, entry: float, stop: float) -> dict | None:
+    """Дневное закрытие + (если нужно) недельные свечи → решение по трекингу контр-сигнала.
+    direction — направление контр-сигнала ("long"/"short"). None — сетевая ошибка, трекинг
+    в этом цикле не трогаем."""
+    try:
+        daily_candles = get_klines(symbol, "1d", 2, timeout=4)
+    except Exception as e:
+        log.warning(f"Не удалось проверить трекинг {symbol}: {e}")
+        return None
+    if len(daily_candles) < 2:
+        return None
+
+    daily_close = daily_candles[-2]["close"]
+    decision = ema_pullback.evaluate_tracking(direction, entry, stop, daily_close)
+
+    if decision != "advance":
+        return {"decision": decision, "daily_close": daily_close}
+
+    next_period = ema_pullback.next_pullback_period(entry_period)
+    if next_period is None:
+        return {"decision": "done"}
+
+    try:
+        weekly_candles = get_klines(symbol, ema_pullback.WEEKLY_INTERVAL, ema_pullback.WEEKLY_LIMIT, timeout=4)
+    except Exception as e:
+        log.warning(f"Не удалось проверить трекинг {symbol}: {e}")
+        return None
+
+    pullback = ema_pullback.build_pullback_signal_for_period(direction, weekly_candles, next_period)
+    if pullback is None:
+        return {"decision": "done"}
+    return {"decision": "advance", "pullback": pullback}
+
+
 def fmt_pullback_caption(pair_name: str, pullback: dict) -> str:
     direction_label = "🟢 LONG" if pullback["direction"] == "long" else "🔴 SHORT"
     lines = [
