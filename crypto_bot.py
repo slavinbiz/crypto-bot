@@ -152,7 +152,7 @@ SIGNALS_DB = "/root/signals.db"
 
 
 def init_signals_db(db_path: str = SIGNALS_DB) -> None:
-    """Создать таблицы signals/signal_checks, если их ещё нет."""
+    """Создать таблицы signals/signal_checks/pullback_tracking, если их ещё нет."""
     conn = sqlite3.connect(db_path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS signals (
@@ -171,6 +171,21 @@ def init_signals_db(db_path: str = SIGNALS_DB) -> None:
             minutes INTEGER NOT NULL,
             pct REAL,
             verdict TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pullback_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            pair_name TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_period INTEGER NOT NULL,
+            entry REAL NOT NULL,
+            stop REAL NOT NULL,
+            take REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -200,6 +215,60 @@ def save_signal_check(signal_id: int, minutes: int, pct: float | None, verdict: 
     conn.execute(
         "INSERT INTO signal_checks (signal_id, minutes, pct, verdict) VALUES (?, ?, ?, ?)",
         (signal_id, minutes, pct, verdict)
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_pullback_tracking(symbol: str, pair_name: str, direction: str, entry_period: int,
+                            entry: float, stop: float, take: float, now: datetime,
+                            db_path: str = SIGNALS_DB) -> int:
+    """Записать новый активный трекинг контр-сигнала, вернуть его id."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO pullback_tracking "
+        "(symbol, pair_name, direction, entry_period, entry, stop, take, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        (symbol, pair_name, direction, entry_period, entry, stop, take, now.isoformat(), now.isoformat())
+    )
+    conn.commit()
+    tracking_id = cur.lastrowid
+    conn.close()
+    return tracking_id
+
+
+def has_active_pullback_tracking(symbol: str, direction: str, db_path: str = SIGNALS_DB) -> bool:
+    """True если для пары+направления уже есть активный трекинг (не плодим дубли)."""
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT 1 FROM pullback_tracking WHERE symbol = ? AND direction = ? AND status = 'active' LIMIT 1",
+        (symbol, direction)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_active_pullback_tracking(db_path: str = SIGNALS_DB) -> list[dict]:
+    """Все активные записи трекинга контр-сигналов."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, symbol, pair_name, direction, entry_period, entry, stop, take "
+        "FROM pullback_tracking WHERE status = 'active'"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_pullback_tracking(tracking_id: int, entry_period: int, entry: float, stop: float,
+                              take: float, status: str, now: datetime,
+                              db_path: str = SIGNALS_DB) -> None:
+    """Обновить запись трекинга — продвижение на следующую EMA, отмена или завершение."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE pullback_tracking SET entry_period = ?, entry = ?, stop = ?, take = ?, status = ?, updated_at = ? "
+        "WHERE id = ?",
+        (entry_period, entry, stop, take, status, now.isoformat(), tracking_id)
     )
     conn.commit()
     conn.close()
