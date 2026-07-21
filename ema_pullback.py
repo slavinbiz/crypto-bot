@@ -17,6 +17,14 @@ EMA_PERIODS = [7, 14, 28]
 STOP_BUFFER_PCT = 2.0
 TAKE_PROFIT_PCT = 3.0
 
+# Санитарный потолок на дистанцию стоп-вход. Ближайший реальный недельный хай/лой
+# дальше входа не всегда рядом — у молодых пар может не быть истории между входом
+# и последним уровнем, тогда "ближайший" реальный уровень оказывается на другом конце
+# всей доступной истории (проверено на реальном сигнале BANK/USDT: стоп улетел на 54%
+# от входа при тейке 3%, риск/прибыль 18:1). Если дистанция больше кратности тейка —
+# считаем структуру нерелевантной и не шлём сигнал, как и при полном отсутствии уровня.
+STOP_MAX_DISTANCE_FACTOR = 3
+
 # calc_ema() сажает EMA на SMA первых `period` свечей, дальше досчитывает по остатку —
 # без разгона минимум в EMA_WARMUP_FACTOR раз больше периода значение остаётся смещено
 # к затравке (проверено на реальных данных: EMA28 по 40 свечам расходился с TradingView
@@ -75,6 +83,10 @@ def build_pullback_signal(direction: str, price: float, weekly_candles: list[dic
     else:
         stop = stop_level * (1 + STOP_BUFFER_PCT / 100)
         take = entry * (1 - TAKE_PROFIT_PCT / 100)
+
+    stop_distance_pct = abs(entry - stop) / entry * 100
+    if stop_distance_pct > TAKE_PROFIT_PCT * STOP_MAX_DISTANCE_FACTOR:
+        return None
 
     return {
         "direction": counter_direction,

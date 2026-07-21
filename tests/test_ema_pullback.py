@@ -104,6 +104,19 @@ def test_build_pullback_signal_works_with_only_one_ema_if_real_high_exists():
     assert result["stop"] == pytest.approx(2.7 * 1.02)
 
 
+def test_build_pullback_signal_none_when_stop_too_far_from_entry():
+    # Реальный кейс BANK/USDT: молодая пара, между входом и ближайшим реальным лоем
+    # нет истории — "ближайший" реальный уровень оказывается на другом конце всей
+    # доступной истории (54% от входа при тейке 3%, риск/прибыль 18:1). Такую
+    # структуру считаем нерелевантной и сигнал не шлём.
+    closes = list(np.linspace(2.0, 1.0, 100))
+    candles = make_weekly_candles(closes, {0: {"low": 0.4}})  # единственный лой — далеко от входа
+    price = 1.10
+
+    result = build_pullback_signal("short", price=price, weekly_candles=candles)
+    assert result is None
+
+
 def test_build_pullback_signal_none_when_no_real_level_beyond_entry():
     # Тот же вход (EMA14), что и в test_..._long_counter_to_dump, но в истории
     # нет ни одной недельной свечи с лоем ниже входа — стоп поставить не за что.
