@@ -52,26 +52,18 @@ def nearest_weekly_stop_level(weekly_candles: list[dict], entry: float, counter_
     return max(beyond) if beyond else None
 
 
-def build_pullback_signal(direction: str, price: float, weekly_candles: list[dict]) -> dict | None:
-    """direction — направление ИСХОДНОГО памп/дамп сигнала ("long" на пампе, "short" на дампе).
-    Контр-сигнал открывается в противоположную сторону. None — если недельной структуры
-    (EMA для входа или реального хая/лоя дальше входа для стопа) не хватает."""
+def build_pullback_signal_for_period(counter_direction: str, weekly_candles: list[dict], entry_period: int) -> dict | None:
+    """Вход на КОНКРЕТНОЙ недельной EMA (а не на ближайшей к цене) — используется как
+    начальным контр-сигналом (через build_pullback_signal), так и трекингом при
+    довыставлении на следующую EMA после пробоя текущей.
+    counter_direction — направление самого контр-сигнала ("long"/"short"), не исходного памп/дамп.
+    None — если период не прогрелся или для него нет структуры под стоп."""
     closes = np.array([c["close"] for c in weekly_candles])
     emas = calc_weekly_emas(closes)
 
-    counter_direction = "short" if direction == "long" else "long"
-
-    if counter_direction == "long":
-        side = {p: v for p, v in emas.items() if v < price}
-    else:
-        side = {p: v for p, v in emas.items() if v > price}
-
-    if not side:
+    if entry_period not in emas:
         return None
-
-    pick_entry = max if counter_direction == "long" else min
-    entry_period = pick_entry(side, key=lambda p: side[p])
-    entry = side[entry_period]
+    entry = emas[entry_period]
 
     stop_level = nearest_weekly_stop_level(weekly_candles, entry, counter_direction)
     if stop_level is None:
@@ -96,3 +88,27 @@ def build_pullback_signal(direction: str, price: float, weekly_candles: list[dic
         "take": take,
         "emas": emas,
     }
+
+
+def build_pullback_signal(direction: str, price: float, weekly_candles: list[dict]) -> dict | None:
+    """direction — направление ИСХОДНОГО памп/дамп сигнала ("long" на пампе, "short" на дампе).
+    Контр-сигнал открывается в противоположную сторону, на ближайшей к цене недельной EMA.
+    None — если недельной структуры (EMA для входа или реального хая/лоя дальше входа для
+    стопа) не хватает."""
+    closes = np.array([c["close"] for c in weekly_candles])
+    emas = calc_weekly_emas(closes)
+
+    counter_direction = "short" if direction == "long" else "long"
+
+    if counter_direction == "long":
+        side = {p: v for p, v in emas.items() if v < price}
+    else:
+        side = {p: v for p, v in emas.items() if v > price}
+
+    if not side:
+        return None
+
+    pick_entry = max if counter_direction == "long" else min
+    entry_period = pick_entry(side, key=lambda p: side[p])
+
+    return build_pullback_signal_for_period(counter_direction, weekly_candles, entry_period)

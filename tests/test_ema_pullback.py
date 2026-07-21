@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 
-from ema_pullback import calc_weekly_emas, build_pullback_signal, EMA_PERIODS, EMA_WARMUP_FACTOR
+from ema_pullback import (
+    calc_weekly_emas, build_pullback_signal, build_pullback_signal_for_period,
+    EMA_PERIODS, EMA_WARMUP_FACTOR,
+)
 
 
 def make_candles(n: int, start: float = 1.0, step: float = 0.01) -> list[dict]:
@@ -125,4 +128,41 @@ def test_build_pullback_signal_none_when_no_real_level_beyond_entry():
     price = 1.10
 
     result = build_pullback_signal("short", price=price, weekly_candles=candles)
+    assert result is None
+
+
+def test_build_pullback_signal_for_period_matches_wrapper_result():
+    # Тот же кейс, что и test_build_pullback_signal_long_counter_to_dump, но период задан явно
+    closes = list(np.linspace(2.0, 1.0, 100))
+    candles = make_weekly_candles(closes, {
+        0: {"low": 1.02},
+        1: {"low": 1.05},
+        2: {"low": 1.03},
+    })
+
+    result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
+
+    assert result is not None
+    assert result["direction"] == "long"
+    assert result["entry_period"] == 14
+    assert result["stop"] == pytest.approx(1.05 * 0.98)
+    assert result["take"] == pytest.approx(result["entry"] * 1.03)
+
+
+def test_build_pullback_signal_for_period_none_when_period_not_warmed_up():
+    # Всего 30 свечей — хватает только на EMA7 (30 >= 7*3), EMA14 не прогрета (30 < 14*3)
+    closes = [c["close"] for c in make_candles(30)]
+    candles = make_weekly_candles(closes)
+
+    result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
+
+    assert result is None
+
+
+def test_build_pullback_signal_for_period_none_when_no_real_level_beyond_entry():
+    closes = list(np.linspace(2.0, 1.0, 100))
+    candles = make_weekly_candles(closes)  # без overrides — low всегда 1e9, стоп не за что поставить
+
+    result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
+
     assert result is None
