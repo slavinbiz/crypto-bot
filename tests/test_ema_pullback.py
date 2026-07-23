@@ -9,15 +9,21 @@ def make_candles(n: int, start: float = 1.0, step: float = 0.01) -> list[dict]:
 
 
 def make_weekly_candles(closes: list[float], overrides: dict[int, dict] | None = None) -> list[dict]:
-    """closes — для расчёта EMA; overrides — {индекс: {"high": v, "low": v}} для конкретных
+    """closes — для расчёта EMA; overrides — {индекс: {"high": v, "low": v, "open": v}} для конкретных
     недельных свечей. По умолчанию high/low выставлены так, чтобы никогда не попасть в поиск
     ближайшего уровня дальше входа (короткого high << любого входа, длинного low >> любого входа) —
-    в тесте "видны" только явно заданные overrides."""
+    в тесте "видны" только явно заданные overrides. По умолчанию open == close (тело свечи 0%,
+    не триггерит гейт свежего спайка)."""
     overrides = overrides or {}
     candles = []
     for i, c in enumerate(closes):
         ov = overrides.get(i, {})
-        candles.append({"close": c, "high": ov.get("high", -1e9), "low": ov.get("low", 1e9)})
+        candles.append({
+            "open": ov.get("open", c),
+            "close": c,
+            "high": ov.get("high", -1e9),
+            "low": ov.get("low", 1e9),
+        })
     return candles
 
 
@@ -126,3 +132,14 @@ def test_build_pullback_signal_none_when_no_real_level_beyond_entry():
 
     result = build_pullback_signal("short", price=price, weekly_candles=candles)
     assert result is None
+
+
+def test_make_weekly_candles_default_open_equals_close():
+    candles = make_weekly_candles([1.0, 2.0, 3.0])
+    assert all(c["open"] == c["close"] for c in candles)
+
+
+def test_make_weekly_candles_open_override():
+    candles = make_weekly_candles([1.0, 2.0, 3.0], overrides={1: {"open": 0.5}})
+    assert candles[1]["open"] == 0.5
+    assert candles[0]["open"] == candles[0]["close"]
