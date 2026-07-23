@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from ema_pullback import calc_weekly_emas, build_pullback_signal, EMA_PERIODS, EMA_WARMUP_FACTOR
+from ema_pullback import calc_weekly_emas, build_pullback_signal, EMA_PERIODS, EMA_WARMUP_FACTOR, has_recent_spike, SPIKE_LOOKBACK_CANDLES, SPIKE_BODY_PCT_THRESHOLD
 
 
 def make_candles(n: int, start: float = 1.0, step: float = 0.01) -> list[dict]:
@@ -131,6 +131,54 @@ def test_build_pullback_signal_none_when_no_real_level_beyond_entry():
     price = 1.10
 
     result = build_pullback_signal("short", price=price, weekly_candles=candles)
+    assert result is None
+
+
+def test_has_recent_spike_true_when_last_candle_body_exceeds_threshold():
+    # Реальный кейс SYN/USDT: последняя свеча — резкий обвал с 1.0 до 0.15 (тело 85%)
+    candles = make_weekly_candles([0.2] * 10, overrides={9: {"open": 1.0}})
+    candles[9]["close"] = 0.15
+    assert has_recent_spike(candles) is True
+
+
+def test_has_recent_spike_true_when_second_to_last_candle_is_the_spike():
+    # Свеча пампа — предпоследняя (open=0.03, close=1.0, тело >3000%), последняя — обычная
+    candles = make_weekly_candles([0.2] * 10, overrides={8: {"open": 0.03}})
+    candles[8]["close"] = 1.0
+    assert has_recent_spike(candles) is True
+
+
+def test_has_recent_spike_false_when_spike_is_old():
+    # Тот же скачок, но 3 свечи назад — вне окна SPIKE_LOOKBACK_CANDLES (2)
+    candles = make_weekly_candles([0.2] * 10, overrides={6: {"open": 0.03}})
+    candles[6]["close"] = 1.0
+    assert has_recent_spike(candles) is False
+
+
+def test_has_recent_spike_false_for_smooth_trend():
+    # Плавный тренд — open == close по умолчанию, тело 0%
+    candles = make_weekly_candles(list(np.linspace(1.0, 2.0, 10)))
+    assert has_recent_spike(candles) is False
+
+
+def test_has_recent_spike_false_exactly_at_threshold():
+    # Тело ровно на пороге (не строго больше) — не считается спайком
+    candles = make_weekly_candles([0.2] * 10, overrides={9: {"open": 1.0}})
+    candles[9]["close"] = 0.5  # тело = 50.0%, ровно порог
+    assert has_recent_spike(candles) is False
+
+
+def test_build_pullback_signal_none_when_recent_spike():
+    # SYN-подобный сценарий: долгий даунтренд, затем на последней неделе резкий памп-обвал —
+    # даже если формально EMA и стоп нашлись бы, гейт спайка должен отменить сигнал целиком.
+    closes = list(np.linspace(2.0, 1.0, 99)) + [1.0]
+    candles = make_weekly_candles(closes, {
+        0: {"low": 0.5},
+        98: {"open": 0.03},
+    })
+    candles[98]["close"] = 1.0  # последняя свеча: open=0.03, close=1.0 — тело >3000%
+
+    result = build_pullback_signal("short", price=1.10, weekly_candles=candles)
     assert result is None
 
 
