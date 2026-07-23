@@ -7,7 +7,7 @@ import ema_pullback
 def fake_klines(weekly_closes):
     def fake(symbol, interval, limit, timeout=10):
         assert interval == ema_pullback.WEEKLY_INTERVAL
-        return [{"close": c, "high": c, "low": c} for c in weekly_closes]
+        return [{"close": c, "high": c, "low": c, "open": c} for c in weekly_closes]
     return fake
 
 
@@ -33,7 +33,7 @@ def test_fetch_pullback_signal_returns_none_on_error(monkeypatch):
 
 def test_fetch_pullback_signal_returns_none_when_not_enough_structure(monkeypatch):
     def fake(symbol, interval, limit, timeout=10):
-        return [{"close": 1.0, "high": 1.0, "low": 1.0} for _ in range(3)]
+        return [{"close": 1.0, "high": 1.0, "low": 1.0, "open": 1.0} for _ in range(3)]
 
     monkeypatch.setattr(crypto_bot, "get_klines", fake)
     result = crypto_bot.fetch_pullback_signal("BTCUSDT", "short", price=1.2)
@@ -46,7 +46,7 @@ def test_fetch_pullback_signal_uses_weekly_interval(monkeypatch):
 
     def fake(symbol, interval, limit, timeout=10):
         calls.append((interval, limit))
-        return [{"close": c, "high": c, "low": c} for c in np.linspace(2.0, 1.0, 100)]
+        return [{"close": c, "high": c, "low": c, "open": c} for c in np.linspace(2.0, 1.0, 100)]
 
     monkeypatch.setattr(crypto_bot, "get_klines", fake)
     crypto_bot.fetch_pullback_signal("BTCUSDT", "short", price=1.2)

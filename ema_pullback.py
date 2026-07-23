@@ -31,6 +31,25 @@ STOP_MAX_DISTANCE_FACTOR = 3
 # на ~17%, по 84+ — совпадал).
 EMA_WARMUP_FACTOR = 3
 
+# Гейт свежего спайка. Реальный пример SYN/USDT: вертикальный памп 0.03 → ~1.0 и обратный обвал
+# в пределах 1-2 недель — структура (EMA, "видимые" хай/лои) ещё не устаканилась после разового
+# экстремального движения, хотя формально EMA и стоп находятся. Порядок EMA не различает такой
+# спайк от плавного тренда (проверено численно на синтетических данных), поэтому проверяем
+# напрямую тело последних свечей.
+SPIKE_LOOKBACK_CANDLES = 2
+SPIKE_BODY_PCT_THRESHOLD = 50.0
+
+
+def has_recent_spike(weekly_candles: list[dict]) -> bool:
+    """True — если тело (|close-open|/open) любой из последних SPIKE_LOOKBACK_CANDLES свечей
+    превышает SPIKE_BODY_PCT_THRESHOLD. Ловит и саму свечу пампа/дампа, и следующую свечу отката —
+    обе бывают экстремальными сразу после события."""
+    recent = weekly_candles[-SPIKE_LOOKBACK_CANDLES:]
+    return any(
+        abs(c["close"] - c["open"]) / c["open"] * 100 > SPIKE_BODY_PCT_THRESHOLD
+        for c in recent
+    )
+
 
 def calc_weekly_emas(closes: np.ndarray) -> dict[int, float]:
     """EMA по каждому периоду, для которого хватает недельных свечей на разгон (period * EMA_WARMUP_FACTOR).
@@ -55,7 +74,11 @@ def nearest_weekly_stop_level(weekly_candles: list[dict], entry: float, counter_
 def build_pullback_signal(direction: str, price: float, weekly_candles: list[dict]) -> dict | None:
     """direction — направление ИСХОДНОГО памп/дамп сигнала ("long" на пампе, "short" на дампе).
     Контр-сигнал открывается в противоположную сторону. None — если недельной структуры
-    (EMA для входа или реального хая/лоя дальше входа для стопа) не хватает."""
+    (EMA для входа или реального хая/лоя дальше входа для стопа) не хватает, либо если в
+    последних свечах был свежий спайк (структура ещё не устаканилась)."""
+    if has_recent_spike(weekly_candles):
+        return None
+
     closes = np.array([c["close"] for c in weekly_candles])
     emas = calc_weekly_emas(closes)
 
