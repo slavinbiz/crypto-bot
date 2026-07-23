@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from ema_pullback import calc_weekly_emas, build_pullback_signal, EMA_PERIODS, EMA_WARMUP_FACTOR, has_recent_spike, SPIKE_LOOKBACK_CANDLES, SPIKE_BODY_PCT_THRESHOLD
+from ema_pullback import (
+    calc_weekly_emas, build_pullback_signal, build_pullback_signal_for_period,
+    next_pullback_period, evaluate_tracking, EMA_PERIODS, EMA_WARMUP_FACTOR,
+    has_recent_spike, SPIKE_LOOKBACK_CANDLES, SPIKE_BODY_PCT_THRESHOLD,
+)
 
 
 def make_candles(n: int, start: float = 1.0, step: float = 0.01) -> list[dict]:
@@ -191,3 +195,81 @@ def test_make_weekly_candles_open_override():
     candles = make_weekly_candles([1.0, 2.0, 3.0], overrides={1: {"open": 0.5}})
     assert candles[1]["open"] == 0.5
     assert candles[0]["open"] == candles[0]["close"]
+
+
+def test_build_pullback_signal_for_period_matches_wrapper_result():
+    # Тот же кейс, что и test_build_pullback_signal_long_counter_to_dump, но период задан явно
+    closes = list(np.linspace(2.0, 1.0, 100))
+    candles = make_weekly_candles(closes, {
+        0: {"low": 1.02},
+        1: {"low": 1.05},
+        2: {"low": 1.03},
+    })
+
+    result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
+
+    assert result is not None
+    assert result["direction"] == "long"
+    assert result["entry_period"] == 14
+    assert result["stop"] == pytest.approx(1.05 * 0.98)
+    assert result["take"] == pytest.approx(result["entry"] * 1.03)
+
+
+def test_build_pullback_signal_for_period_none_when_period_not_warmed_up():
+    # Всего 30 свечей — хватает только на EMA7 (30 >= 7*3), EMA14 не прогрета (30 < 14*3)
+    closes = [c["close"] for c in make_candles(30)]
+    candles = make_weekly_candles(closes)
+
+    result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
+
+    assert result is None
+
+
+def test_build_pullback_signal_for_period_none_when_no_real_level_beyond_entry():
+    closes = list(np.linspace(2.0, 1.0, 100))
+    candles = make_weekly_candles(closes)  # без overrides — low всегда 1e9, стоп не за что поставить
+
+    result = build_pullback_signal_for_period("long", weekly_candles=candles, entry_period=14)
+
+    assert result is None
+
+
+def test_next_pullback_period_returns_next_in_chain():
+    assert next_pullback_period(7) == 14
+    assert next_pullback_period(14) == 28
+
+
+def test_next_pullback_period_none_after_last():
+    assert next_pullback_period(28) is None
+
+
+def test_evaluate_tracking_long_advance_when_close_above_entry():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=101.0) == "advance"
+
+
+def test_evaluate_tracking_long_invalidate_when_close_below_stop():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=94.0) == "invalidate"
+
+
+def test_evaluate_tracking_long_none_between_stop_and_entry():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=97.0) == "none"
+
+
+def test_evaluate_tracking_long_boundary_at_entry_is_none():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=100.0) == "none"
+
+
+def test_evaluate_tracking_long_boundary_at_stop_is_none():
+    assert evaluate_tracking("long", entry=100.0, stop=95.0, daily_close=95.0) == "none"
+
+
+def test_evaluate_tracking_short_advance_when_close_below_entry():
+    assert evaluate_tracking("short", entry=100.0, stop=105.0, daily_close=99.0) == "advance"
+
+
+def test_evaluate_tracking_short_invalidate_when_close_above_stop():
+    assert evaluate_tracking("short", entry=100.0, stop=105.0, daily_close=106.0) == "invalidate"
+
+
+def test_evaluate_tracking_short_none_between_entry_and_stop():
+    assert evaluate_tracking("short", entry=100.0, stop=105.0, daily_close=103.0) == "none"

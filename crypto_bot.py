@@ -152,7 +152,7 @@ SIGNALS_DB = "/root/signals.db"
 
 
 def init_signals_db(db_path: str = SIGNALS_DB) -> None:
-    """Создать таблицы signals/signal_checks, если их ещё нет."""
+    """Создать таблицы signals/signal_checks/pullback_tracking, если их ещё нет."""
     conn = sqlite3.connect(db_path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS signals (
@@ -171,6 +171,21 @@ def init_signals_db(db_path: str = SIGNALS_DB) -> None:
             minutes INTEGER NOT NULL,
             pct REAL,
             verdict TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pullback_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            pair_name TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            entry_period INTEGER NOT NULL,
+            entry REAL NOT NULL,
+            stop REAL NOT NULL,
+            take REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -200,6 +215,60 @@ def save_signal_check(signal_id: int, minutes: int, pct: float | None, verdict: 
     conn.execute(
         "INSERT INTO signal_checks (signal_id, minutes, pct, verdict) VALUES (?, ?, ?, ?)",
         (signal_id, minutes, pct, verdict)
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_pullback_tracking(symbol: str, pair_name: str, direction: str, entry_period: int,
+                            entry: float, stop: float, take: float, now: datetime,
+                            db_path: str = SIGNALS_DB) -> int:
+    """Записать новый активный трекинг контр-сигнала, вернуть его id."""
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute(
+        "INSERT INTO pullback_tracking "
+        "(symbol, pair_name, direction, entry_period, entry, stop, take, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+        (symbol, pair_name, direction, entry_period, entry, stop, take, now.isoformat(), now.isoformat())
+    )
+    conn.commit()
+    tracking_id = cur.lastrowid
+    conn.close()
+    return tracking_id
+
+
+def has_active_pullback_tracking(symbol: str, direction: str, db_path: str = SIGNALS_DB) -> bool:
+    """True если для пары+направления уже есть активный трекинг (не плодим дубли)."""
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT 1 FROM pullback_tracking WHERE symbol = ? AND direction = ? AND status = 'active' LIMIT 1",
+        (symbol, direction)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_active_pullback_tracking(db_path: str = SIGNALS_DB) -> list[dict]:
+    """Все активные записи трекинга контр-сигналов."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, symbol, pair_name, direction, entry_period, entry, stop, take "
+        "FROM pullback_tracking WHERE status = 'active'"
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_pullback_tracking(tracking_id: int, entry_period: int, entry: float, stop: float,
+                              take: float, status: str, now: datetime,
+                              db_path: str = SIGNALS_DB) -> None:
+    """Обновить запись трекинга — продвижение на следующую EMA, отмена или завершение."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "UPDATE pullback_tracking SET entry_period = ?, entry = ?, stop = ?, take = ?, status = ?, updated_at = ? "
+        "WHERE id = ?",
+        (entry_period, entry, stop, take, status, now.isoformat(), tracking_id)
     )
     conn.commit()
     conn.close()
@@ -298,6 +367,40 @@ def fetch_pullback_signal(symbol: str, direction: str, price: float) -> dict | N
     except Exception as e:
         log.warning(f"Не удалось получить контр-сигнал для {symbol}: {e}")
         return None
+
+
+def fetch_tracking_update(symbol: str, direction: str, entry_period: int, entry: float, stop: float) -> dict | None:
+    """Дневное закрытие + (если нужно) недельные свечи → решение по трекингу контр-сигнала.
+    direction — направление контр-сигнала ("long"/"short"). None — сетевая ошибка, трекинг
+    в этом цикле не трогаем."""
+    try:
+        daily_candles = get_klines(symbol, "1d", 2, timeout=4)
+    except Exception as e:
+        log.warning(f"Не удалось проверить трекинг {symbol}: {e}")
+        return None
+    if len(daily_candles) < 2:
+        return None
+
+    daily_close = daily_candles[-2]["close"]
+    decision = ema_pullback.evaluate_tracking(direction, entry, stop, daily_close)
+
+    if decision != "advance":
+        return {"decision": decision, "daily_close": daily_close}
+
+    next_period = ema_pullback.next_pullback_period(entry_period)
+    if next_period is None:
+        return {"decision": "done"}
+
+    try:
+        weekly_candles = get_klines(symbol, ema_pullback.WEEKLY_INTERVAL, ema_pullback.WEEKLY_LIMIT, timeout=4)
+    except Exception as e:
+        log.warning(f"Не удалось проверить трекинг {symbol}: {e}")
+        return None
+
+    pullback = ema_pullback.build_pullback_signal_for_period(direction, weekly_candles, next_period)
+    if pullback is None:
+        return {"decision": "done"}
+    return {"decision": "advance", "pullback": pullback}
 
 
 def fmt_pullback_caption(pair_name: str, pullback: dict) -> str:
@@ -873,9 +976,13 @@ async def signal_loop(app: Application):
         ptask.add_done_callback(g_background_tasks.discard)
 
     async def send_pullback_signal(symbol: str, direction: str, price: float, pair_name: str):
-        """Контр-сигнал по недельным EMA против направления памп/дамп. Тихо ничего не шлёт, если структуры не хватает."""
+        """Контр-сигнал по недельным EMA против направления памп/дамп. Тихо ничего не шлёт, если структуры
+        не хватает или для этой пары+направления уже есть активный трекинг."""
         pullback = await asyncio.to_thread(fetch_pullback_signal, symbol, direction, price)
         if pullback is None:
+            return
+        already_tracking = await asyncio.to_thread(has_active_pullback_tracking, symbol, pullback["direction"])
+        if already_tracking:
             return
         log.info(
             f"Контр-сигнал: {symbol} — {pullback['direction'].upper()} "
@@ -885,6 +992,65 @@ async def signal_loop(app: Application):
             await bot.send_message(CHAT_ID, fmt_pullback_caption(pair_name, pullback), parse_mode=ParseMode.HTML)
         except Exception as e:
             log.warning(f"Ошибка отправки контр-сигнала {symbol}: {e}")
+            return
+        await asyncio.to_thread(
+            save_pullback_tracking, symbol, pair_name, pullback["direction"], pullback["entry_period"],
+            pullback["entry"], pullback["stop"], pullback["take"], datetime.now(timezone.utc)
+        )
+
+    async def check_pullback_tracking():
+        """Раз в сутки — проверяем все активные трекинги контр-сигналов на продвижение/отмену/завершение."""
+        rows = await asyncio.to_thread(get_active_pullback_tracking)
+        for row in rows:
+            result = await asyncio.to_thread(
+                fetch_tracking_update, row["symbol"], row["direction"], row["entry_period"], row["entry"], row["stop"]
+            )
+            if result is None or result["decision"] == "none":
+                continue
+
+            now_dt = datetime.now(timezone.utc)
+
+            if result["decision"] == "invalidate":
+                await asyncio.to_thread(
+                    update_pullback_tracking, row["id"], row["entry_period"], row["entry"], row["stop"],
+                    row["take"], "invalidated", now_dt
+                )
+                try:
+                    await bot.send_message(
+                        CHAT_ID,
+                        f"🔻 Сетап <code>{row['pair_name']}</code> сломан — дневное закрытие "
+                        f"{result['daily_close']:.5g} пробило стоп {row['stop']:.5g}",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    log.warning(f"Ошибка отправки отмены трекинга {row['symbol']}: {e}")
+                continue
+
+            if result["decision"] == "done":
+                await asyncio.to_thread(
+                    update_pullback_tracking, row["id"], row["entry_period"], row["entry"], row["stop"],
+                    row["take"], "done", now_dt
+                )
+                try:
+                    await bot.send_message(
+                        CHAT_ID,
+                        f"🏁 <code>{row['pair_name']}</code> прошёл все EMA, дальше пробивать нечего",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    log.warning(f"Ошибка отправки завершения трекинга {row['symbol']}: {e}")
+                continue
+
+            # decision == "advance"
+            pullback = result["pullback"]
+            await asyncio.to_thread(
+                update_pullback_tracking, row["id"], pullback["entry_period"], pullback["entry"], pullback["stop"],
+                pullback["take"], "active", now_dt
+            )
+            try:
+                await bot.send_message(CHAT_ID, fmt_pullback_caption(row["pair_name"], pullback), parse_mode=ParseMode.HTML)
+            except Exception as e:
+                log.warning(f"Ошибка отправки продвижения трекинга {row['symbol']}: {e}")
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
                              trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int):
@@ -951,6 +1117,7 @@ async def signal_loop(app: Application):
         nonlocal valid_symbols, tickers_24h
         last_funding = time.time()
         last_full    = time.time()
+        last_pullback_date = None
 
         while True:
             # Ждём события перезагрузки или таймаут 60с
@@ -1008,6 +1175,15 @@ async def signal_loop(app: Application):
                     last_full = now
                 except Exception as e:
                     log.warning(f"Ошибка обновления: {e}")
+
+            # Раз в сутки, после закрытия дневной свечи (00:05 UTC) — проверяем трекинг контр-сигналов
+            now_dt = datetime.now(timezone.utc)
+            if (now_dt.hour, now_dt.minute) >= (0, 5) and last_pullback_date != now_dt.date():
+                try:
+                    await check_pullback_tracking()
+                    last_pullback_date = now_dt.date()
+                except Exception as e:
+                    log.warning(f"Ошибка проверки трекинга контр-сигналов: {e}")
 
     # Запускаем websocket и refresh параллельно
     await asyncio.gather(

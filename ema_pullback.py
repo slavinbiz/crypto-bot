@@ -71,30 +71,18 @@ def nearest_weekly_stop_level(weekly_candles: list[dict], entry: float, counter_
     return max(beyond) if beyond else None
 
 
-def build_pullback_signal(direction: str, price: float, weekly_candles: list[dict]) -> dict | None:
-    """direction — направление ИСХОДНОГО памп/дамп сигнала ("long" на пампе, "short" на дампе).
-    Контр-сигнал открывается в противоположную сторону. None — если недельной структуры
-    (EMA для входа или реального хая/лоя дальше входа для стопа) не хватает, либо если в
-    последних свечах был свежий спайк (структура ещё не устаканилась)."""
-    if has_recent_spike(weekly_candles):
-        return None
-
+def build_pullback_signal_for_period(counter_direction: str, weekly_candles: list[dict], entry_period: int) -> dict | None:
+    """Вход на КОНКРЕТНОЙ недельной EMA (а не на ближайшей к цене) — используется как
+    начальным контр-сигналом (через build_pullback_signal), так и трекингом при
+    довыставлении на следующую EMA после пробоя текущей.
+    counter_direction — направление самого контр-сигнала ("long"/"short"), не исходного памп/дамп.
+    None — если период не прогрелся или для него нет структуры под стоп."""
     closes = np.array([c["close"] for c in weekly_candles])
     emas = calc_weekly_emas(closes)
 
-    counter_direction = "short" if direction == "long" else "long"
-
-    if counter_direction == "long":
-        side = {p: v for p, v in emas.items() if v < price}
-    else:
-        side = {p: v for p, v in emas.items() if v > price}
-
-    if not side:
+    if entry_period not in emas:
         return None
-
-    pick_entry = max if counter_direction == "long" else min
-    entry_period = pick_entry(side, key=lambda p: side[p])
-    entry = side[entry_period]
+    entry = emas[entry_period]
 
     stop_level = nearest_weekly_stop_level(weekly_candles, entry, counter_direction)
     if stop_level is None:
@@ -119,3 +107,56 @@ def build_pullback_signal(direction: str, price: float, weekly_candles: list[dic
         "take": take,
         "emas": emas,
     }
+
+
+def build_pullback_signal(direction: str, price: float, weekly_candles: list[dict]) -> dict | None:
+    """direction — направление ИСХОДНОГО памп/дамп сигнала ("long" на пампе, "short" на дампе).
+    Контр-сигнал открывается в противоположную сторону, на ближайшей к цене недельной EMA.
+    None — если недельной структуры (EMA для входа или реального хая/лоя дальше входа для
+    стопа) не хватает, либо если в последних свечах был свежий спайк (структура ещё не
+    устаканилась). Гейт спайка проверяется только на первичном сигнале — довыставление
+    трекингом на следующую EMA идёт напрямую через build_pullback_signal_for_period."""
+    if has_recent_spike(weekly_candles):
+        return None
+
+    closes = np.array([c["close"] for c in weekly_candles])
+    emas = calc_weekly_emas(closes)
+
+    counter_direction = "short" if direction == "long" else "long"
+
+    if counter_direction == "long":
+        side = {p: v for p, v in emas.items() if v < price}
+    else:
+        side = {p: v for p, v in emas.items() if v > price}
+
+    if not side:
+        return None
+
+    pick_entry = max if counter_direction == "long" else min
+    entry_period = pick_entry(side, key=lambda p: side[p])
+
+    return build_pullback_signal_for_period(counter_direction, weekly_candles, entry_period)
+
+
+def next_pullback_period(current_period: int) -> int | None:
+    """Следующий период в цепочке EMA_PERIODS после текущего. None — если текущий последний."""
+    idx = EMA_PERIODS.index(current_period)
+    return EMA_PERIODS[idx + 1] if idx + 1 < len(EMA_PERIODS) else None
+
+
+def evaluate_tracking(direction: str, entry: float, stop: float, daily_close: float) -> str:
+    """Что делать с активным трекингом контр-сигнала по дневному закрытию:
+    "advance" — закрытие прошло дальше входа (пора ждать отскока от следующей EMA),
+    "invalidate" — закрытие пробило стоп (структура сломана, трекинг отменяем),
+    "none" — ничего не изменилось, продолжаем ждать."""
+    if direction == "long":
+        if daily_close < stop:
+            return "invalidate"
+        if daily_close > entry:
+            return "advance"
+    else:
+        if daily_close > stop:
+            return "invalidate"
+        if daily_close < entry:
+            return "advance"
+    return "none"
