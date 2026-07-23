@@ -176,7 +176,7 @@ def test_build_pullback_signal_none_when_recent_spike():
         0: {"low": 0.5},
         98: {"open": 0.03},
     })
-    candles[98]["close"] = 1.0  # последняя свеча: open=0.03, close=1.0 — тело >3000%
+    candles[98]["close"] = 1.0  # предпоследняя свеча: open=0.03, close=1.0 — тело >3000%
 
     result = build_pullback_signal("short", price=1.10, weekly_candles=candles)
     assert result is None
