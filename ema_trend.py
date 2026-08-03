@@ -9,7 +9,7 @@ EMA_DISTANCE_THRESHOLD_PCT = 0.5
 TREND_INTERVAL = "1h"
 TREND_LIMIT = 1000
 PULLBACK_INTERVAL = "15m"
-PULLBACK_LIMIT = 30
+PULLBACK_LIMIT = 100
 
 
 def calc_ema(closes: np.ndarray, period: int) -> float:

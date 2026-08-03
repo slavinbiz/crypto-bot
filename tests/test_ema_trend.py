@@ -17,6 +17,16 @@ def test_trend_limit_gives_converged_ema200():
     assert seed_residual_weight < 0.01
 
 
+def test_pullback_limit_gives_converged_ema20():
+    """Тот же баг конвергенции calc_ema, что и у TREND_LIMIT, но для EMA20 на 15m
+    (см. дневник 2026-08-03) — при PULLBACK_LIMIT=30 затравка сохраняла ~37% веса."""
+    period = ema_trend.EMA_PULLBACK
+    warmup_steps = ema_trend.PULLBACK_LIMIT - period
+    alpha = 2 / (period + 1)
+    seed_residual_weight = (1 - alpha) ** warmup_steps
+    assert seed_residual_weight < 0.01
+
+
 def test_calc_ema_basic():
     closes = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
     # seed = mean(10,11,12) = 11.0; alpha = 2/(3+1) = 0.5
