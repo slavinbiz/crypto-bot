@@ -616,7 +616,7 @@ def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str
     chg_24h   = float(ticker.get("priceChangePercent", 0))
     vol_24h   = float(ticker.get("quoteVolume", 0))
     arrow     = "▲" if price_change >= 0 else "▼"
-    pair_name = symbol.replace("USDT", "/USDT")
+    pair_name = symbol
     vol_str   = f"{vol_24h/1e9:.1f}B" if vol_24h >= 1e9 else f"{vol_24h/1e6:.1f}M"
 
     fig.text(0.01, 0.97,
@@ -688,7 +688,7 @@ async def cmd_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not g_valid_symbols:
         await update.message.reply_text("Бот ещё загружает пары, подожди немного.")
         return
-    pairs = [s.replace("USDT", "/USDT") for s in g_valid_symbols]
+    pairs = list(g_valid_symbols)
     text  = f"📋 <b>Отслеживаю {len(pairs)} пар:</b>\n\n"
     text += "  ".join(f"<code>{p}</code>" for p in sorted(pairs))
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -758,7 +758,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not g_valid_symbols:
             await query.edit_message_text("Бот ещё загружает пары, подожди немного.")
             return
-        pairs = [s.replace("USDT", "/USDT") for s in g_valid_symbols]
+        pairs = list(g_valid_symbols)
         text  = f"📋 <b>Отслеживаю {len(pairs)} пар:</b>\n\n"
         text += "  ".join(f"<code>{p}</code>" for p in sorted(pairs))
         await query.edit_message_text(text, parse_mode=ParseMode.HTML,
@@ -939,7 +939,7 @@ async def signal_loop(app: Application):
         pump_pct   = (price_now - price_then) / price_then * 100
         vol_24h    = float(ticker.get('quoteVolume', 0))
         vol_str    = f"{vol_24h/1e9:.1f}B" if vol_24h >= 1e9 else f"{vol_24h/1e6:.1f}M"
-        pair_name  = symbol.replace("USDT", "/USDT")
+        pair_name  = symbol
 
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
         direction = "long" if "ПАМП" in desc else "short"
