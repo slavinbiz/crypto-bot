@@ -1,6 +1,20 @@
 import numpy as np
 import pytest
+import ema_trend
 from ema_trend import calc_ema, get_trend_verdict
+
+
+def test_trend_limit_gives_converged_ema200():
+    """TREND_LIMIT должен давать calc_ema достаточно "разгона" после затравки —
+    иначе EMA200 остаётся смесью в основном из SMA(200), а не настоящим EMA200
+    (баг: при TREND_LIMIT=210 затравка после 10 шагов сохраняла ~90% веса,
+    из-за чего 1H-тренд иногда определялся неверно на волатильных альтах —
+    см. дневник 2026-08-03)."""
+    period = ema_trend.EMA_TREND_SLOW
+    warmup_steps = ema_trend.TREND_LIMIT - period
+    alpha = 2 / (period + 1)
+    seed_residual_weight = (1 - alpha) ** warmup_steps
+    assert seed_residual_weight < 0.01
 
 
 def test_calc_ema_basic():
