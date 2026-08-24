@@ -27,7 +27,6 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, Bo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 
-import ema_trend
 import ema_pullback
 
 def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None, trend_label=None) -> str:
@@ -348,17 +347,6 @@ def get_klines(symbol: str, interval: str, limit: int, timeout: int = 10) -> lis
     return candles
 
 
-def fetch_trend_verdict(symbol: str, direction: str, price: float) -> dict:
-    """Обёртка над ema_trend.get_trend_verdict с сетевыми запросами и обработкой ошибок."""
-    try:
-        trend_candles    = get_klines(symbol, ema_trend.TREND_INTERVAL, ema_trend.TREND_LIMIT, timeout=4)
-        pullback_candles = get_klines(symbol, ema_trend.PULLBACK_INTERVAL, ema_trend.PULLBACK_LIMIT, timeout=4)
-        return ema_trend.get_trend_verdict(direction, price, trend_candles, pullback_candles)
-    except Exception as e:
-        log.warning(f"Не удалось получить тренд-вердикт для {symbol}: {e}")
-        return {"verdict": "unknown", "label": "⚪ Не удалось проверить", "distance_pct": None}
-
-
 def fetch_pullback_signal(symbol: str, direction: str, price: float) -> dict | None:
     """Обёртка над ema_pullback.build_pullback_signal с сетевым запросом недельных свечей."""
     try:
@@ -655,10 +643,7 @@ def load_settings():
             PUMP_PCT          = s.get("PUMP_PCT",           PUMP_PCT)
             IIV_HOT           = s.get("IIV_HOT",            IIV_HOT)
             MIN_PAIR_AGE_DAYS = s.get("MIN_PAIR_AGE_DAYS",  MIN_PAIR_AGE_DAYS)
-            ema_trend.EMA_DISTANCE_THRESHOLD_PCT = s.get(
-                "EMA_DISTANCE_THRESHOLD_PCT", ema_trend.EMA_DISTANCE_THRESHOLD_PCT
-            )
-        log.info(f"Настройки загружены: vol=${MIN_VOLUME_USDT//1_000_000}M pump={PUMP_PCT}% iiv={IIV_HOT}x age={MIN_PAIR_AGE_DAYS//30}мес ema_dist={ema_trend.EMA_DISTANCE_THRESHOLD_PCT}%")
+        log.info(f"Настройки загружены: vol=${MIN_VOLUME_USDT//1_000_000}M pump={PUMP_PCT}% iiv={IIV_HOT}x age={MIN_PAIR_AGE_DAYS//30}мес")
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
@@ -669,7 +654,6 @@ def save_settings():
             "PUMP_PCT":          PUMP_PCT,
             "IIV_HOT":           IIV_HOT,
             "MIN_PAIR_AGE_DAYS": MIN_PAIR_AGE_DAYS,
-            "EMA_DISTANCE_THRESHOLD_PCT": ema_trend.EMA_DISTANCE_THRESHOLD_PCT,
         }, f)
 
 # ─── ГЛОБАЛЬНОЕ СОСТОЯНИЕ (для команд) ───────────────────────────────────────
@@ -944,12 +928,9 @@ async def signal_loop(app: Application):
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
         direction = "long" if "ПАМП" in desc else "short"
 
-        trend_verdict = await asyncio.to_thread(fetch_trend_verdict, symbol, direction, price_now)
-
         caption = fmt_caption(
             pair_name, signal_label, pump_pct,
-            price_then, price_now, chg_24h, vol_str, funding,
-            trend_label=trend_verdict["label"]
+            price_then, price_now, chg_24h, vol_str, funding
         )
 
         log.info(f"Сигнал: {symbol} — {desc.split(chr(10))[0]}")
@@ -965,9 +946,9 @@ async def signal_loop(app: Application):
             log.warning(f"Ошибка отправки {symbol}: {e}")
 
         signal_time = candle["time"]
-        signal_id = save_signal(symbol, pair_name, direction, price_now, signal_time, trend_verdict["label"])
+        signal_id = save_signal(symbol, pair_name, direction, price_now, signal_time, None)
 
-        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, trend_verdict["label"], pair_name, signal_time, signal_id))
+        vtask = asyncio.create_task(verify_signal(symbol, direction, price_now, None, pair_name, signal_time, signal_id))
         g_background_tasks.add(vtask)
         vtask.add_done_callback(g_background_tasks.discard)
 
