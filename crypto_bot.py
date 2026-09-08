@@ -59,24 +59,26 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
 TELEGRAM_TOKEN = "8892073473:AAFe1oVfpGXRTh_SHEoL7UD_OsYvTyho2SA"   # вставь токен от @BotFather
 CHAT_ID        = "-1003708330324"      # вставь chat_id куда слать сигналы
 
-INTERVAL       = "1m"                     # 1-минутные свечи
-LOOKBACK       = 120                      # сколько свечей на графике (2 часа)
+INTERVAL         = "5m"                   # 5-минутные свечи — сигнал берём с 5м графика, не с 1м
+INTERVAL_MINUTES = int(INTERVAL.rstrip("m"))  # длительность одной свечи в минутах, единый источник для окон ниже
+LOOKBACK       = (2 * 60) // INTERVAL_MINUTES  # сколько свечей на графике (2 часа)
 CHECK_EVERY    = 60                       # проверка каждые 60 секунд
 PAIR_DELAY     = 0.5                      # пауза между парами (сек)
 
 # Параметры сигналов
-TREND_PERIOD       = 60        # период скользящей средней (тренд)
+TREND_PERIOD       = 60 // INTERVAL_MINUTES  # период скользящей средней (тренд), 60 минут
 VOLUME_RATIO_MIN   = 2.0       # дисбаланс buy/sell для сигнала
 PRICE_CHANGE_PCT   = 0.3       # % пробоя тренда
 
 # Памп/Дамп
 PUMP_PCT           = 6.0       # % изменения цены для сигнала
-PUMP_WINDOW        = 60        # за сколько минут считать памп
+PUMP_WINDOW_MINUTES = 60       # за сколько минут считать памп
+PUMP_WINDOW         = PUMP_WINDOW_MINUTES // INTERVAL_MINUTES  # то же самое в свечах текущего таймфрейма
 
 # Проверка сигналов постфактум — отследить, пошла ли цена в сторону сигнала
 SIGNAL_CHECK_MINUTES       = [15, 60, 240]   # через сколько минут проверять цену
 SIGNAL_CHECK_DEADZONE_PCT  = 0.5             # % — в пределах этого считаем "около входа"
-SIGNAL_CHECK_STALE_MINUTES = 5               # свеча старше этого — считаем данные протухшими
+SIGNAL_CHECK_STALE_MINUTES = 2 * INTERVAL_MINUTES  # свеча старше этого — считаем данные протухшими (запас в 2 свечи)
 
 # Фильтры
 MIN_PAIR_AGE_DAYS  = 180        # минимальный возраст пары (6 мес)
@@ -507,7 +509,7 @@ class SignalState:
             rsi_label = f" | RSI {rsi:.0f}{'⚠️' if rsi > 75 else ''}"
             desc = (
                 f"🚀 ПАМП\n"
-                f"Рост +{pump_pct:.2f}% за {window} мин\n"
+                f"Рост +{pump_pct:.2f}% за {window * INTERVAL_MINUTES} мин\n"
                 f"{price_ago:,.5g} → {price:,.5g}\n"
                 f"IIV x{iiv:.1f} (порог {IIV_HOT}x){rsi_label}"
             )
@@ -523,7 +525,7 @@ class SignalState:
             rsi_label = f" | RSI {rsi:.0f}{'⚠️' if rsi < 25 else ''}"
             desc = (
                 f"💥 ДАМП\n"
-                f"Падение {pump_pct:.2f}% за {window} мин\n"
+                f"Падение {pump_pct:.2f}% за {window * INTERVAL_MINUTES} мин\n"
                 f"{price_ago:,.5g} → {price:,.5g}\n"
                 f"IIV x{iiv:.1f} (порог {IIV_HOT}x){rsi_label}"
             )
@@ -626,7 +628,7 @@ def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str
 
     window   = min(PUMP_WINDOW, len(closes) - 1)
     pump_pct = (closes[-1] - closes[-window - 1]) / closes[-window - 1] * 100
-    fig.text(0.99, 0.91, f"{'🚀' if pump_pct >= 0 else '💥'} {pump_pct:+.2f}% за {window}м",
+    fig.text(0.99, 0.91, f"{'🚀' if pump_pct >= 0 else '💥'} {pump_pct:+.2f}% за {window * INTERVAL_MINUTES}м",
              color="#00c853" if pump_pct >= 0 else "#ff1744",
              fontsize=9, va="top", ha="right", fontfamily="monospace")
 
@@ -1084,7 +1086,7 @@ async def signal_loop(app: Application):
     async def ws_listen(symbols: list[str]):
         """Подключиться к Binance Websocket и слушать свечи."""
         # Binance позволяет до 1024 стримов на соединение
-        streams = "/".join(f"{s.lower()}@kline_1m" for s in symbols)
+        streams = "/".join(f"{s.lower()}@kline_{INTERVAL}" for s in symbols)
         url = f"wss://stream.binance.com:9443/stream?streams={streams}"
 
         while True:
