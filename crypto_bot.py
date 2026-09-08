@@ -54,18 +54,27 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
 
 
 def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_price: float,
-                       pattern_kind: str, pattern_time: datetime, pump_pct: float, pump_window_min: int) -> str:
+                       take_price: float | None, pattern_kind: str, pattern_time: datetime,
+                       pump_pct: float, pump_window_min: int) -> str:
     """Caption для входа после разворотного паттерна (пин-бар/поглощение) — разворот
-    против исходного памп/дампа."""
+    против исходного памп/дампа. take_price — уровень начала движения (обычно цена
+    откатывает как минимум туда); None, если движение уже откатило дальше этого уровня
+    к моменту входа — тогда цель пропускаем, решать руками."""
     direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
     move_label = "дампа" if direction == "long" else "пампа"
     time_str = pattern_time.strftime("%H:%M UTC")
+    take_line = (
+        f"Тейк: <code>{take_price:.5g}</code> (начало движения)\n"
+        if take_price is not None else
+        "Тейк: цель уже пройдена, дальше на своё усмотрение\n"
+    )
     return (
         f"🎯 Вход <code>{pair_name}</code>  <i>Binance</i>  {direction_label}\n"
         f"{pattern_kind.capitalize()} {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
         f"+ дивергенция RSI подтверждена\n"
         f"Вход: <code>{entry_price:.5g}</code>\n"
-        f"Стоп: <code>{stop_price:.5g}</code> (за хвост/тело сигнальной свечи)"
+        f"Стоп: <code>{stop_price:.5g}</code> (за хвост/тело сигнальной свечи)\n"
+        f"{take_line}"
     )
 
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
@@ -214,7 +223,10 @@ def init_signals_db(db_path: str = SIGNALS_DB) -> None:
 def save_signal(symbol: str, pair_name: str, direction: str, entry_price: float,
                  signal_time: datetime, trend_label: str | None,
                  db_path: str = SIGNALS_DB) -> int:
-    """Записать новый сигнал, вернуть его id."""
+    """Записать новый сигнал, вернуть его id. trend_label здесь переиспользован под тип
+    сигнала: None — сырой памп/дамп рывок (просто наблюдение), иначе — название разворотного
+    паттерна ("поглощение"/"пин-бар"/...), которым подтверждён вход. Так дашборд статистики
+    сможет отличить один тип от другого."""
     conn = sqlite3.connect(db_path)
     cur = conn.execute(
         "INSERT INTO signals (symbol, pair_name, direction, entry_price, signal_time, trend_label) "
@@ -478,17 +490,23 @@ def combine_candles(candles: list[dict]) -> dict:
 PIN_BAR_COMBINE_MAX = 3   # схлопываем до стольки последних свечей, если разворот растянут на 10-15 мин
 
 
-def find_reversal_pattern(candles: list[dict], bearish: bool) -> dict | None:
-    """Ищет на конце candles поглощение или пин-бар (в т.ч. схлопнутый из нескольких свечей).
+def find_reversal_pattern(candles: list[dict], since_signal: list[dict], bearish: bool) -> dict | None:
+    """Ищет разворотный паттерн: поглощение или пин-бар (одиночный или схлопнутый).
+    candles — вся история свечей пары (для одиночного пин-бара/поглощения — смотрим на
+    самый свежий конец). since_signal — свечи от пика рывка (включительно) до текущего
+    момента, максимум PIN_BAR_COMBINE_MAX штук: схлопнутый пин-бар всегда привязан к пику,
+    а не к «последним N свечам от сейчас» — иначе окно уезжает от пика, и фигура, сложившаяся
+    прямо на развороте, не поймается через несколько свечей.
     Возвращает {"kind": подпись для сообщения, "candle": итоговая свеча для входа/стопа}
     или None, если ничего не подошло."""
     if len(candles) >= 2 and is_engulfing(candles[-2], candles[-1], bearish):
         return {"kind": "поглощение", "candle": candles[-1]}
-    for n in range(1, min(PIN_BAR_COMBINE_MAX, len(candles)) + 1):
-        combo = combine_candles(candles[-n:])
+    if is_pin_bar(candles[-1], bearish):
+        return {"kind": "пин-бар", "candle": candles[-1]}
+    for n in range(2, len(since_signal) + 1):
+        combo = combine_candles(since_signal[:n])
         if is_pin_bar(combo, bearish):
-            kind = "пин-бар" if n == 1 else f"пин-бар за {n * INTERVAL_MINUTES} мин"
-            return {"kind": kind, "candle": combo}
+            return {"kind": f"пин-бар за {n * INTERVAL_MINUTES} мин", "candle": combo}
     return None
 
 
@@ -910,13 +928,24 @@ async def signal_loop(app: Application):
         watch = pin_bar_watches.get(symbol)
         if watch:
             bearish = watch["direction"] == "short"
-            pattern = find_reversal_pattern(candles_store[symbol], bearish)
+            # Свечи от пика рывка (включительно) — окно для схлопнутого пин-бара, привязанное
+            # к самому пику, а не «последние N от сейчас» (иначе к концу наблюдения окно
+            # уезжает от пика и фигура, сложившаяся прямо на развороте, пропускается)
+            if len(watch["since_signal"]) < PIN_BAR_COMBINE_MAX:
+                watch["since_signal"].append(candle)
+            pattern = find_reversal_pattern(candles_store[symbol], watch["since_signal"], bearish)
             if pattern and has_rsi_divergence(candles_store[symbol], bearish):
                 entry_price = pattern["candle"]["close"]
                 stop_price  = pattern["candle"]["high"] if bearish else pattern["candle"]["low"]
                 pair_name   = format_pair_name(symbol)
+                target_price = watch["target_price"]
+                # Тейк валиден, только если он ещё впереди по ходу сделки — иначе цена уже
+                # откатила дальше уровня начала движения к моменту входа
+                take_price = target_price if (
+                    (bearish and target_price < entry_price) or (not bearish and target_price > entry_price)
+                ) else None
                 entry_caption = fmt_entry_caption(
-                    pair_name, watch["direction"], entry_price, stop_price,
+                    pair_name, watch["direction"], entry_price, stop_price, take_price,
                     pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"]
                 )
                 log.info(f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} {entry_price:.5g}")
@@ -924,7 +953,7 @@ async def signal_loop(app: Application):
                     await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
                 except Exception as e:
                     log.warning(f"Ошибка отправки входа {symbol}: {e}")
-                entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], None)
+                entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], pattern["kind"])
                 etask = asyncio.create_task(
                     verify_signal(symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id)
                 )
@@ -963,12 +992,15 @@ async def signal_loop(app: Application):
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
         direction = "long" if "ПАМП" in desc else "short"
 
-        # Ставим пару под наблюдение: ждём пин-бар в сторону, обратную рывку, чтобы войти на разворот
+        # Ставим пару под наблюдение: ждём пин-бар в сторону, обратную рывку, чтобы войти на разворот.
+        # Тейк — уровень начала движения (price_then): обычно цена откатывает как минимум туда
         pin_bar_watches[symbol] = {
             "direction":       "short" if direction == "long" else "long",
             "candles_left":    PIN_BAR_WATCH_CANDLES,
             "pump_pct":        pump_pct,
             "pump_window_min": window * INTERVAL_MINUTES,
+            "target_price":    price_then,
+            "since_signal":    [candle],   # свеча пика — начало окна для схлопнутого пин-бара
         }
 
         caption = fmt_caption(
