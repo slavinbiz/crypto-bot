@@ -52,6 +52,20 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
         f"{trend_str}"
     )
 
+
+def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_price: float,
+                       pin_candle_time: datetime, pump_pct: float, pump_window_min: int) -> str:
+    """Caption для входа после пин-бара — разворот против исходного памп/дампа."""
+    direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
+    move_label = "дампа" if direction == "long" else "пампа"
+    time_str = pin_candle_time.strftime("%H:%M UTC")
+    return (
+        f"🎯 Вход <code>{pair_name}</code>  <i>Binance</i>  {direction_label}\n"
+        f"Пин-бар {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
+        f"Вход: <code>{entry_price:.5g}</code>\n"
+        f"Стоп: <code>{stop_price:.5g}</code> (за хвост пин-бара)"
+    )
+
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
 
 TELEGRAM_TOKEN = "8892073473:AAFe1oVfpGXRTh_SHEoL7UD_OsYvTyho2SA"   # вставь токен от @BotFather
@@ -407,6 +421,28 @@ class SignalState:
 
         return False, "", rsi
 
+# ─── ПИН-БАР ПОСЛЕ РЫВКА (вход на разворот) ────────────────────────────────────
+# После памп/дамп-сигнала не входим сразу, а ждём пин-бар — свечу с длинным
+# хвостом отказа в противоположную сторону от рывка. Памп вверх -> ждём
+# медвежий пин-бар (длинный верхний хвост) -> вход в шорт. Дамп вниз -> ждём
+# бычий пин-бар (длинный нижний хвост) -> вход в лонг.
+
+PIN_BAR_WATCH_CANDLES  = 6     # сколько свечей ждём пин-бар после сигнала (30 мин на 5м графике)
+PIN_BAR_WICK_MULT      = 2.0   # хвост пин-бара минимум во столько раз длиннее тела свечи
+PIN_BAR_WICK_SHARE_MIN = 0.6   # и минимум такая доля всего диапазона свечи (high-low)
+
+
+def is_pin_bar(candle: dict, bearish: bool) -> bool:
+    """bearish=True — длинный верхний хвост (отказ сверху, сигнал на шорт после пампа).
+    bearish=False — длинный нижний хвост (отказ снизу, сигнал на лонг после дампа)."""
+    o, h, l, c = candle["open"], candle["high"], candle["low"], candle["close"]
+    total_range = h - l
+    if total_range <= 0:
+        return False
+    body = abs(c - o)
+    wick = (h - max(o, c)) if bearish else (min(o, c) - l)
+    return wick >= PIN_BAR_WICK_MULT * body and wick >= PIN_BAR_WICK_SHARE_MIN * total_range
+
 # ─── ГРАФИК ───────────────────────────────────────────────────────────────────
 
 def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str, rsi_val: float = 50.0) -> str:
@@ -713,6 +749,10 @@ async def signal_loop(app: Application):
     states: dict[str, SignalState] = {}
     # Хранилище свечей для каждой пары: symbol -> list[dict]
     candles_store: dict[str, list[dict]] = {}
+    # Ожидание пин-бара после памп/дамп-сигнала: symbol -> {"direction", "candles_left",
+    # "pump_pct", "pump_window_min"}. direction здесь — направление ВХОДА (разворот,
+    # противоположное направлению исходного памп/дампа).
+    pin_bar_watches: dict[str, dict] = {}
     _last_refresh = 0.0
 
     async def load_symbols():
@@ -784,6 +824,35 @@ async def signal_loop(app: Application):
         if len(candles_store[symbol]) > LOOKBACK:
             candles_store[symbol] = candles_store[symbol][-LOOKBACK:]
 
+        # Если пара под наблюдением после памп/дампа — проверяем эту свечу на пин-бар
+        watch = pin_bar_watches.get(symbol)
+        if watch:
+            bearish = watch["direction"] == "short"
+            if is_pin_bar(candle, bearish):
+                entry_price = candle["close"]
+                stop_price  = candle["high"] if bearish else candle["low"]
+                pair_name   = format_pair_name(symbol)
+                entry_caption = fmt_entry_caption(
+                    pair_name, watch["direction"], entry_price, stop_price,
+                    candle["time"], watch["pump_pct"], watch["pump_window_min"]
+                )
+                log.info(f"Пин-бар вход: {symbol} — {watch['direction'].upper()} {entry_price:.5g}")
+                try:
+                    await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    log.warning(f"Ошибка отправки входа {symbol}: {e}")
+                entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], None)
+                etask = asyncio.create_task(
+                    verify_signal(symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id)
+                )
+                g_background_tasks.add(etask)
+                etask.add_done_callback(g_background_tasks.discard)
+                del pin_bar_watches[symbol]
+            else:
+                watch["candles_left"] -= 1
+                if watch["candles_left"] <= 0:
+                    del pin_bar_watches[symbol]
+
         candles = candles_store[symbol]
         if len(candles) < PUMP_WINDOW + 5:
             return   # недостаточно данных
@@ -810,6 +879,14 @@ async def signal_loop(app: Application):
 
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
         direction = "long" if "ПАМП" in desc else "short"
+
+        # Ставим пару под наблюдение: ждём пин-бар в сторону, обратную рывку, чтобы войти на разворот
+        pin_bar_watches[symbol] = {
+            "direction":       "short" if direction == "long" else "long",
+            "candles_left":    PIN_BAR_WATCH_CANDLES,
+            "pump_pct":        pump_pct,
+            "pump_window_min": window * INTERVAL_MINUTES,
+        }
 
         caption = fmt_caption(
             pair_name, signal_label, pump_pct,
