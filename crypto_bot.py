@@ -29,6 +29,15 @@ from telegram.constants import ParseMode
 
 import ema_pullback
 
+def format_pair_name(symbol: str) -> str:
+    """SYMBOLUSDT -> SYMBOL/USDT. Единый формат для всех мест, где пара пишется
+    в БД (signals.pair_name, pullback_tracking.pair_name) или показывается человеку —
+    раньше часть кода писала голый symbol без слэша, из-за чего одна и та же
+    монета попадала в базу под двумя разными строками."""
+    if symbol.endswith("USDT"):
+        return f"{symbol[:-4]}/USDT"
+    return symbol
+
 def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None, trend_label=None) -> str:
     """Формирует caption без конфликтов с Markdown."""
     funding_str = ""
@@ -604,7 +613,7 @@ def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str
     chg_24h   = float(ticker.get("priceChangePercent", 0))
     vol_24h   = float(ticker.get("quoteVolume", 0))
     arrow     = "▲" if price_change >= 0 else "▼"
-    pair_name = symbol
+    pair_name = format_pair_name(symbol)
     vol_str   = f"{vol_24h/1e9:.1f}B" if vol_24h >= 1e9 else f"{vol_24h/1e6:.1f}M"
 
     fig.text(0.01, 0.97,
@@ -923,7 +932,7 @@ async def signal_loop(app: Application):
         pump_pct   = (price_now - price_then) / price_then * 100
         vol_24h    = float(ticker.get('quoteVolume', 0))
         vol_str    = f"{vol_24h/1e9:.1f}B" if vol_24h >= 1e9 else f"{vol_24h/1e6:.1f}M"
-        pair_name  = symbol
+        pair_name  = format_pair_name(symbol)
 
         signal_label = "🚀 Pump" if "ПАМП" in desc else "💥 Dump"
         direction = "long" if "ПАМП" in desc else "short"
