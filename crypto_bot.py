@@ -928,6 +928,17 @@ async def signal_loop(app: Application):
         watch = pin_bar_watches.get(symbol)
         if watch:
             bearish = watch["direction"] == "short"
+            # Отмена: цена ЗАКРЫЛАСЬ за экстремумом пика без разворотного паттерна — значит,
+            # разворота не случилось, рывок продолжается, наблюдение больше не актуально
+            invalidated = (candle["close"] > watch["extreme"]) if bearish else (candle["close"] < watch["extreme"])
+            if invalidated:
+                log.info(f"Наблюдение отменено (пробой пика): {symbol} — {watch['direction'].upper()}")
+                del pin_bar_watches[symbol]
+                watch = None
+
+        if watch:
+            watch["extreme"] = (max(watch["extreme"], candle["high"]) if bearish
+                                 else min(watch["extreme"], candle["low"]))
             # Свечи от пика рывка (включительно) — окно для схлопнутого пин-бара, привязанное
             # к самому пику, а не «последние N от сейчас» (иначе к концу наблюдения окно
             # уезжает от пика и фигура, сложившаяся прямо на развороте, пропускается)
@@ -993,7 +1004,10 @@ async def signal_loop(app: Application):
         direction = "long" if "ПАМП" in desc else "short"
 
         # Ставим пару под наблюдение: ждём пин-бар в сторону, обратную рывку, чтобы войти на разворот.
-        # Тейк — уровень начала движения (price_then): обычно цена откатывает как минимум туда
+        # Тейк — уровень начала движения (price_then): обычно цена откатывает как минимум туда.
+        # extreme — экстремум пика (high для шорт-наблюдения, low для лонг-наблюдения):
+        # если цена ЗАКРОЕТСЯ за этим уровнем без разворотного паттерна — наблюдение отменяется,
+        # разворота не было, идёт продолжение
         pin_bar_watches[symbol] = {
             "direction":       "short" if direction == "long" else "long",
             "candles_left":    PIN_BAR_WATCH_CANDLES,
@@ -1001,6 +1015,7 @@ async def signal_loop(app: Application):
             "pump_window_min": window * INTERVAL_MINUTES,
             "target_price":    price_then,
             "since_signal":    [candle],   # свеча пика — начало окна для схлопнутого пин-бара
+            "extreme":         candle["high"] if direction == "long" else candle["low"],
         }
 
         caption = fmt_caption(
