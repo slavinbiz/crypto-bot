@@ -62,6 +62,7 @@ def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_p
     return (
         f"🎯 Вход <code>{pair_name}</code>  <i>Binance</i>  {direction_label}\n"
         f"Пин-бар {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
+        f"+ дивергенция RSI подтверждена\n"
         f"Вход: <code>{entry_price:.5g}</code>\n"
         f"Стоп: <code>{stop_price:.5g}</code> (за хвост пин-бара)"
     )
@@ -130,6 +131,14 @@ def calc_rsi(closes: np.ndarray, period: int = RSI_PERIOD) -> float:
         return 100.0
     rs = avg_gain / avg_loss
     return round(100 - 100 / (1 + rs), 1)
+
+
+def calc_rsi_series(closes: np.ndarray, period: int = RSI_PERIOD) -> np.ndarray:
+    """RSI на каждую свечу (скользящий) — NaN там, где данных ещё не хватает."""
+    rsi_series = np.full(len(closes), np.nan)
+    for i in range(period, len(closes)):
+        rsi_series[i] = calc_rsi(closes[:i + 1], period)
+    return rsi_series
 
 
 def calc_iiv(total_vols: np.ndarray) -> float:
@@ -443,6 +452,42 @@ def is_pin_bar(candle: dict, bearish: bool) -> bool:
     wick = (h - max(o, c)) if bearish else (min(o, c) - l)
     return wick >= PIN_BAR_WICK_MULT * body and wick >= PIN_BAR_WICK_SHARE_MIN * total_range
 
+
+DIVERGENCE_SWING_ORDER = 2   # соседей с каждой стороны, чтобы точка считалась локальным экстремумом
+
+
+def has_rsi_divergence(candles: list[dict], bearish: bool) -> bool:
+    """Дивергенция цена/RSI: сравниваем текущую свечу (последнюю в candles) с предыдущим
+    локальным экстремумом того же типа. bearish=True — медвежья дивергенция: цена сейчас
+    выше (или на уровне) прошлого максимума, а RSI ниже, чем был там — импульс слабее,
+    несмотря на более высокую цену (сигнал на шорт). bearish=False — симметрично для
+    минимума цены и лонга."""
+    closes = np.array([c["close"] for c in candles])
+    if len(closes) < RSI_PERIOD + 10:
+        return False
+    rsi_series = calc_rsi_series(closes)
+
+    from scipy.signal import argrelextrema
+    extrema_kind = np.greater if bearish else np.less
+    try:
+        # исключаем последние 3 свечи — это и есть текущее движение, ищем экстремум до него
+        idx = argrelextrema(closes[:-3], extrema_kind, order=DIVERGENCE_SWING_ORDER)[0]
+    except Exception:
+        return False
+    idx = idx[idx >= RSI_PERIOD]  # там, где RSI уже посчитан
+    if len(idx) == 0:
+        return False
+    prev_idx = idx[-1]   # ближайший к текущему моменту прошлый экстремум
+
+    cur_price, cur_rsi   = closes[-1], rsi_series[-1]
+    prev_price, prev_rsi = closes[prev_idx], rsi_series[prev_idx]
+    if np.isnan(cur_rsi) or np.isnan(prev_rsi):
+        return False
+
+    if bearish:
+        return cur_price >= prev_price and cur_rsi < prev_rsi
+    return cur_price <= prev_price and cur_rsi > prev_rsi
+
 # ─── ГРАФИК ───────────────────────────────────────────────────────────────────
 
 def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str, rsi_val: float = 50.0) -> str:
@@ -452,9 +497,7 @@ def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str
     sells  = np.array([c["vol_sell"] for c in candles])
 
     # RSI для каждой свечи (скользящий)
-    rsi_series = np.full(len(closes), np.nan)
-    for i in range(RSI_PERIOD, len(closes)):
-        rsi_series[i] = calc_rsi(closes[:i + 1])
+    rsi_series = calc_rsi_series(closes)
 
     levels       = np.quantile(closes, [0.1, 0.25, 0.5, 0.75, 0.9])
     price_change = (closes[-1] - closes[0]) / closes[0] * 100
@@ -824,11 +867,11 @@ async def signal_loop(app: Application):
         if len(candles_store[symbol]) > LOOKBACK:
             candles_store[symbol] = candles_store[symbol][-LOOKBACK:]
 
-        # Если пара под наблюдением после памп/дампа — проверяем эту свечу на пин-бар
+        # Если пара под наблюдением после памп/дампа — проверяем эту свечу на пин-бар + дивергенцию RSI
         watch = pin_bar_watches.get(symbol)
         if watch:
             bearish = watch["direction"] == "short"
-            if is_pin_bar(candle, bearish):
+            if is_pin_bar(candle, bearish) and has_rsi_divergence(candles_store[symbol], bearish):
                 entry_price = candle["close"]
                 stop_price  = candle["high"] if bearish else candle["low"]
                 pair_name   = format_pair_name(symbol)
