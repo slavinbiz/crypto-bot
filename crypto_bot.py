@@ -54,17 +54,18 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
 
 
 def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_price: float,
-                       pin_candle_time: datetime, pump_pct: float, pump_window_min: int) -> str:
-    """Caption для входа после пин-бара — разворот против исходного памп/дампа."""
+                       pattern_kind: str, pattern_time: datetime, pump_pct: float, pump_window_min: int) -> str:
+    """Caption для входа после разворотного паттерна (пин-бар/поглощение) — разворот
+    против исходного памп/дампа."""
     direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
     move_label = "дампа" if direction == "long" else "пампа"
-    time_str = pin_candle_time.strftime("%H:%M UTC")
+    time_str = pattern_time.strftime("%H:%M UTC")
     return (
         f"🎯 Вход <code>{pair_name}</code>  <i>Binance</i>  {direction_label}\n"
-        f"Пин-бар {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
+        f"{pattern_kind.capitalize()} {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
         f"+ дивергенция RSI подтверждена\n"
         f"Вход: <code>{entry_price:.5g}</code>\n"
-        f"Стоп: <code>{stop_price:.5g}</code> (за хвост пин-бара)"
+        f"Стоп: <code>{stop_price:.5g}</code> (за хвост/тело сигнальной свечи)"
     )
 
 # ─── НАСТРОЙКИ ────────────────────────────────────────────────────────────────
@@ -451,6 +452,44 @@ def is_pin_bar(candle: dict, bearish: bool) -> bool:
     body = abs(c - o)
     wick = (h - max(o, c)) if bearish else (min(o, c) - l)
     return wick >= PIN_BAR_WICK_MULT * body and wick >= PIN_BAR_WICK_SHARE_MIN * total_range
+
+
+def is_engulfing(prev_candle: dict, candle: dict, bearish: bool) -> bool:
+    """bearish=True — медвежье поглощение: текущая свеча красная и её тело полностью
+    перекрывает тело предыдущей зелёной свечи (отказ сверху, сигнал на шорт после пампа).
+    bearish=False — бычье поглощение, симметрично (сигнал на лонг после дампа)."""
+    p_o, p_c = prev_candle["open"], prev_candle["close"]
+    o, c = candle["open"], candle["close"]
+    if bearish:
+        return p_c > p_o and c < o and o >= p_c and c <= p_o
+    return p_c < p_o and c > o and o <= p_c and c >= p_o
+
+
+def combine_candles(candles: list[dict]) -> dict:
+    """Схлопывает несколько подряд идущих свечей в одну синтетическую: open первой,
+    close последней, high/low — экстремумы всех. Нужно для пин-бара, растянутого
+    на пару свечей вместо одной."""
+    return dict(
+        open=candles[0]["open"], close=candles[-1]["close"],
+        high=max(c["high"] for c in candles), low=min(c["low"] for c in candles),
+    )
+
+
+PIN_BAR_COMBINE_MAX = 3   # схлопываем до стольки последних свечей, если разворот растянут на 10-15 мин
+
+
+def find_reversal_pattern(candles: list[dict], bearish: bool) -> dict | None:
+    """Ищет на конце candles поглощение или пин-бар (в т.ч. схлопнутый из нескольких свечей).
+    Возвращает {"kind": подпись для сообщения, "candle": итоговая свеча для входа/стопа}
+    или None, если ничего не подошло."""
+    if len(candles) >= 2 and is_engulfing(candles[-2], candles[-1], bearish):
+        return {"kind": "поглощение", "candle": candles[-1]}
+    for n in range(1, min(PIN_BAR_COMBINE_MAX, len(candles)) + 1):
+        combo = combine_candles(candles[-n:])
+        if is_pin_bar(combo, bearish):
+            kind = "пин-бар" if n == 1 else f"пин-бар за {n * INTERVAL_MINUTES} мин"
+            return {"kind": kind, "candle": combo}
+    return None
 
 
 DIVERGENCE_SWING_ORDER = 2   # соседей с каждой стороны, чтобы точка считалась локальным экстремумом
@@ -867,19 +906,20 @@ async def signal_loop(app: Application):
         if len(candles_store[symbol]) > LOOKBACK:
             candles_store[symbol] = candles_store[symbol][-LOOKBACK:]
 
-        # Если пара под наблюдением после памп/дампа — проверяем эту свечу на пин-бар + дивергенцию RSI
+        # Если пара под наблюдением после памп/дампа — проверяем разворотный паттерн + дивергенцию RSI
         watch = pin_bar_watches.get(symbol)
         if watch:
             bearish = watch["direction"] == "short"
-            if is_pin_bar(candle, bearish) and has_rsi_divergence(candles_store[symbol], bearish):
-                entry_price = candle["close"]
-                stop_price  = candle["high"] if bearish else candle["low"]
+            pattern = find_reversal_pattern(candles_store[symbol], bearish)
+            if pattern and has_rsi_divergence(candles_store[symbol], bearish):
+                entry_price = pattern["candle"]["close"]
+                stop_price  = pattern["candle"]["high"] if bearish else pattern["candle"]["low"]
                 pair_name   = format_pair_name(symbol)
                 entry_caption = fmt_entry_caption(
                     pair_name, watch["direction"], entry_price, stop_price,
-                    candle["time"], watch["pump_pct"], watch["pump_window_min"]
+                    pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"]
                 )
-                log.info(f"Пин-бар вход: {symbol} — {watch['direction'].upper()} {entry_price:.5g}")
+                log.info(f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} {entry_price:.5g}")
                 try:
                     await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
                 except Exception as e:
