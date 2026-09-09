@@ -28,12 +28,9 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.constants import ParseMode
 
 def format_pair_name(symbol: str) -> str:
-    """SYMBOLUSDT -> SYMBOL/USDT. Единый формат для всех мест, где пара пишется
-    в БД (signals.pair_name, pullback_tracking.pair_name) или показывается человеку —
-    раньше часть кода писала голый symbol без слэша, из-за чего одна и та же
-    монета попадала в базу под двумя разными строками."""
-    if symbol.endswith("USDT"):
-        return f"{symbol[:-4]}/USDT"
+    """Единый формат для всех мест, где пара пишется в БД (signals.pair_name,
+    pullback_tracking.pair_name) или показывается человеку — без слэша,
+    как в нативном формате Binance (SYMBOLUSDT)."""
     return symbol
 
 def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24h, vol_str, funding=None, trend_label=None) -> str:
