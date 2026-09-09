@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 команды и решения/
 .worktrees/
+divergence_test_out.txt
