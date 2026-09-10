@@ -27,6 +27,13 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, Bo
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.constants import ParseMode
 
+MSK_OFFSET = timedelta(hours=3)
+
+def fmt_msk(dt: datetime) -> str:
+    """Время сигнала для человека — по Москве (UTC+3), не UTC, чтобы не путать
+    со временем получения сообщения в Telegram (оно уже в локальной зоне клиента)."""
+    return (dt + MSK_OFFSET).strftime("%H:%M МСК")
+
 def format_pair_name(symbol: str) -> str:
     """Единый формат для всех мест, где пара пишется в БД (signals.pair_name,
     pullback_tracking.pair_name) или показывается человеку — без слэша,
@@ -59,7 +66,7 @@ def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_p
     к моменту входа — тогда цель пропускаем, решать руками."""
     direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
     move_label = "дампа" if direction == "long" else "пампа"
-    time_str = pattern_time.strftime("%H:%M UTC")
+    time_str = fmt_msk(pattern_time)
     take_line = (
         f"Тейк: <code>{take_price:.5g}</code> (начало движения)\n"
         if take_price is not None else
@@ -1081,7 +1088,7 @@ async def signal_loop(app: Application):
             checkpoints.append((minutes, adjusted_pct, verdict))
             save_signal_check(signal_id, minutes, adjusted_pct, verdict)
 
-        signal_time_str = signal_time.strftime("%H:%M UTC")
+        signal_time_str = fmt_msk(signal_time)
         lines = [f"🔍 Проверка сигнала <code>{pair_name}</code> {signal_time_str}  <i>Binance</i> (тренд был: {trend_label or '—'})"]
         for minutes, pct, verdict in checkpoints:
             if pct is None:
