@@ -450,6 +450,8 @@ PIN_BAR_WATCH_CANDLES  = 6     # сколько свечей ждём пин-б�
 PIN_BAR_WICK_MULT      = 2.0   # хвост пин-бара минимум во столько раз длиннее тела свечи
 PIN_BAR_WICK_SHARE_MIN = 0.6   # и минимум такая доля всего диапазона свечи (high-low)
 
+MIN_RISK_REWARD = 3.0   # минимум R:R (тейк/стоп от входа), иначе вход не публикуем — решение Вячеслава 10.09.2026
+
 
 def is_pin_bar(candle: dict, bearish: bool) -> bool:
     """bearish=True — длинный верхний хвост (отказ сверху, сигнал на шорт после пампа).
@@ -952,21 +954,35 @@ async def signal_loop(app: Application):
                 take_price = target_price if (
                     (bearish and target_price < entry_price) or (not bearish and target_price > entry_price)
                 ) else None
-                entry_caption = fmt_entry_caption(
-                    pair_name, watch["direction"], entry_price, stop_price, take_price,
-                    pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"]
-                )
-                log.info(f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} {entry_price:.5g}")
-                try:
-                    await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
-                except Exception as e:
-                    log.warning(f"Ошибка отправки входа {symbol}: {e}")
-                entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], pattern["kind"])
-                etask = asyncio.create_task(
-                    verify_signal(symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id)
-                )
-                g_background_tasks.add(etask)
-                etask.add_done_callback(g_background_tasks.discard)
+
+                # Гейт R:R — без тейка (уровень уже пройден) риск/прибыль не посчитать,
+                # приравниваем к провалу фильтра. Само наблюдение снимаем в любом случае:
+                # паттерн разворота уже случился, ждать другого смысла нет.
+                risk   = abs(entry_price - stop_price)
+                reward = abs(take_price - entry_price) if take_price is not None else None
+                rr     = (reward / risk) if (reward is not None and risk > 0) else None
+                if rr is None or rr < MIN_RISK_REWARD:
+                    rr_str = f"{rr:.2f}" if rr is not None else "нет тейка"
+                    log.info(
+                        f"Вход отфильтрован по R:R ({pattern['kind']}): {symbol} — "
+                        f"{watch['direction'].upper()} R:R={rr_str}"
+                    )
+                else:
+                    entry_caption = fmt_entry_caption(
+                        pair_name, watch["direction"], entry_price, stop_price, take_price,
+                        pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"]
+                    )
+                    log.info(f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} {entry_price:.5g} R:R={rr:.2f}")
+                    try:
+                        await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
+                    except Exception as e:
+                        log.warning(f"Ошибка отправки входа {symbol}: {e}")
+                    entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], pattern["kind"])
+                    etask = asyncio.create_task(
+                        verify_signal(symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id)
+                    )
+                    g_background_tasks.add(etask)
+                    etask.add_done_callback(g_background_tasks.discard)
                 del pin_bar_watches[symbol]
             else:
                 watch["candles_left"] -= 1
