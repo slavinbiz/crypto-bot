@@ -59,14 +59,17 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
 
 def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_price: float,
                        take_price: float | None, pattern_kind: str, pattern_time: datetime,
-                       pump_pct: float, pump_window_min: int) -> str:
+                       pump_pct: float, pump_window_min: int, has_divergence: bool) -> str:
     """Caption для входа после разворотного паттерна (пин-бар/поглощение) — разворот
     против исходного памп/дампа. take_price — уровень начала движения (обычно цена
     откатывает как минимум туда); None, если движение уже откатило дальше этого уровня
-    к моменту входа — тогда цель пропускаем, решать руками."""
+    к моменту входа — тогда цель пропускаем, решать руками. has_divergence — только
+    пометка в сообщении (с 11.09.2026 дивергенция RSI не гейт для входа, решает паттерн+R:R),
+    подсказка, что сигнал сильнее обычного."""
     direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
     move_label = "дампа" if direction == "long" else "пампа"
     time_str = fmt_msk(pattern_time)
+    div_line = "RSI-дивергенция: есть\n" if has_divergence else "RSI-дивергенция: нет\n"
     take_line = (
         f"Тейк: <code>{take_price:.5g}</code> (начало движения)\n"
         if take_price is not None else
@@ -75,7 +78,7 @@ def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_p
     return (
         f"🎯 Вход <code>{pair_name}</code>  <i>Binance</i>  {direction_label}\n"
         f"{pattern_kind.capitalize()} {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
-        f"+ дивергенция RSI подтверждена\n"
+        f"{div_line}"
         f"Вход: <code>{entry_price:.5g}</code>\n"
         f"Стоп: <code>{stop_price:.5g}</code> (за хвост/тело сигнальной свечи)\n"
         f"{take_line}"
@@ -951,7 +954,11 @@ async def signal_loop(app: Application):
             if len(watch["since_signal"]) < PIN_BAR_COMBINE_MAX:
                 watch["since_signal"].append(candle)
             pattern = find_reversal_pattern(candles_store[symbol], watch["since_signal"], bearish)
-            if pattern and has_rsi_divergence(candles_store[symbol], bearish):
+            if pattern:
+                # Дивергенция RSI больше не гейт (решение Вячеслава 11.09.2026) — паттерна
+                # + R:R достаточно для входа, дивергенция только помечается в сообщении
+                # как доп. сигнал качества, на усмотрение того, кто читает
+                has_divergence = has_rsi_divergence(candles_store[symbol], bearish)
                 entry_price = pattern["candle"]["close"]
                 stop_price  = pattern["candle"]["high"] if bearish else pattern["candle"]["low"]
                 pair_name   = format_pair_name(symbol)
@@ -977,9 +984,14 @@ async def signal_loop(app: Application):
                 else:
                     entry_caption = fmt_entry_caption(
                         pair_name, watch["direction"], entry_price, stop_price, take_price,
-                        pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"]
+                        pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"],
+                        has_divergence
                     )
-                    log.info(f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} {entry_price:.5g} R:R={rr:.2f}")
+                    div_str = "есть" if has_divergence else "нет"
+                    log.info(
+                        f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} "
+                        f"{entry_price:.5g} R:R={rr:.2f} дивергенция={div_str}"
+                    )
                     try:
                         await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
                     except Exception as e:
