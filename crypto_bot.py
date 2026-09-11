@@ -994,6 +994,7 @@ async def signal_loop(app: Application):
             else:
                 watch["candles_left"] -= 1
                 if watch["candles_left"] <= 0:
+                    log.info(f"Наблюдение истекло (паттерн не сложился): {symbol} — {watch['direction'].upper()}")
                     del pin_bar_watches[symbol]
 
         candles = candles_store[symbol]
