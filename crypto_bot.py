@@ -554,6 +554,17 @@ def has_rsi_divergence(candles: list[dict], bearish: bool) -> bool:
         return cur_price >= prev_price and cur_rsi < prev_rsi
     return cur_price <= prev_price and cur_rsi > prev_rsi
 
+
+def divergence_status_note(entry_divergence: bool, cur_divergence: bool | None, minutes: int) -> str | None:
+    """Дивергенция при входе может ещё не сложиться (второй пик появляется позже) — не гейт,
+    но раз мы уже проверяем сигнал в SIGNAL_CHECK_MINUTES, заодно пересчитываем и её.
+    Пометка только если статус изменился с момента входа; None — без изменений/нет данных."""
+    if cur_divergence is None or cur_divergence == entry_divergence:
+        return None
+    state = "появилась" if cur_divergence else "пропала"
+    was = "есть" if entry_divergence else "нет"
+    return f"⚠️ RSI-дивергенция {state} к {minutes}м (при входе: {was})"
+
 # ─── ГРАФИК ───────────────────────────────────────────────────────────────────
 
 def build_chart(symbol: str, candles: list[dict], ticker: dict, signal_desc: str, rsi_val: float = 50.0) -> str:
@@ -998,7 +1009,10 @@ async def signal_loop(app: Application):
                         log.warning(f"Ошибка отправки входа {symbol}: {e}")
                     entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], pattern["kind"])
                     etask = asyncio.create_task(
-                        verify_signal(symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id)
+                        verify_signal(
+                            symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id,
+                            entry_divergence=has_divergence
+                        )
                     )
                     g_background_tasks.add(etask)
                     etask.add_done_callback(g_background_tasks.discard)
@@ -1076,9 +1090,15 @@ async def signal_loop(app: Application):
         vtask.add_done_callback(g_background_tasks.discard)
 
     async def verify_signal(symbol: str, direction: str, entry_price: float,
-                             trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int):
-        """Через SIGNAL_CHECK_MINUTES точек проверить, пошла ли цена в сторону сигнала."""
+                             trend_label: str | None, pair_name: str, signal_time: datetime, signal_id: int,
+                             entry_divergence: bool | None = None):
+        """Через SIGNAL_CHECK_MINUTES точек проверить, пошла ли цена в сторону сигнала.
+        entry_divergence — статус RSI-дивергенции на момент входа (только для входов по
+        пин-бару, не для сырых памп/дамп-детектов — там дивергенция не считалась). Если задан,
+        заодно пересчитываем дивергенцию на каждой точке и отмечаем, если она с тех пор
+        появилась/пропала (второй пик часто складывается позже входа — см. разбор 12.09.2026)."""
         checkpoints = []
+        div_notes = []
         elapsed = 0
         for minutes in SIGNAL_CHECK_MINUTES:
             wait_s = minutes * 60 - elapsed
@@ -1101,6 +1121,12 @@ async def signal_loop(app: Application):
             checkpoints.append((minutes, adjusted_pct, verdict))
             save_signal_check(signal_id, minutes, adjusted_pct, verdict)
 
+            if entry_divergence is not None:
+                cur_divergence = has_rsi_divergence(candles, bearish=(direction == "short"))
+                note = divergence_status_note(entry_divergence, cur_divergence, minutes)
+                if note:
+                    div_notes.append(note)
+
         signal_time_str = fmt_msk(signal_time)
         lines = [f"🔍 Проверка сигнала <code>{pair_name}</code> {signal_time_str}  <i>Binance</i> (тренд был: {trend_label or '—'})"]
         for minutes, pct, verdict in checkpoints:
@@ -1108,6 +1134,7 @@ async def signal_loop(app: Application):
                 lines.append(f"{minutes}м: нет свежих данных")
             else:
                 lines.append(f"{minutes}м: {pct:+.2f}% — {verdict}")
+        lines.extend(div_notes)
 
         try:
             await bot.send_message(CHAT_ID, "\n".join(lines), parse_mode=ParseMode.HTML)
