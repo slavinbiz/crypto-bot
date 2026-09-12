@@ -881,6 +881,12 @@ async def signal_loop(app: Application):
     # "pump_pct", "pump_window_min"}. direction здесь — направление ВХОДА (разворот,
     # противоположное направлению исходного памп/дампа).
     pin_bar_watches: dict[str, dict] = {}
+    # Паттерн уже найден, ждём возврата цены к open свечи-паттерна (лимитка) либо отмены
+    # по пробою стопа без возврата — решение Вячеслава 12.09.2026, см. combine_candles/
+    # find_reversal_pattern и разбор в memory/2026-09-12.md. symbol -> {"direction",
+    # "entry_open", "stop_price", "take_price", "pattern_kind", "pump_pct",
+    # "pump_window_min", "extreme", "rr"}.
+    pending_limit_entries: dict[str, dict] = {}
     _last_refresh = 0.0
 
     async def load_symbols():
@@ -952,6 +958,61 @@ async def signal_loop(app: Application):
         if len(candles_store[symbol]) > LOOKBACK:
             candles_store[symbol] = candles_store[symbol][-LOOKBACK:]
 
+        # Лимитка на возврат к open свечи-паттерна — проверяем раньше самого наблюдения
+        # за паттерном, т.к. это следующая стадия той же сделки (наблюдение уже снято)
+        pending = pending_limit_entries.get(symbol)
+        if pending:
+            bearish2 = pending["direction"] == "short"
+            # Инвалидация — как и у наблюдения за паттерном: цена ЗАКРЫЛАСЬ за уже
+            # достигнутым экстремумом без возврата к нашей цене — сделка отменяется,
+            # молча, без входа (сравниваем со СТАРЫМ экстремумом, до этой свечи)
+            invalidated2 = (candle["close"] > pending["extreme"]) if bearish2 else (candle["close"] < pending["extreme"])
+            if invalidated2:
+                log.info(
+                    f"Лимит-вход отменён (пробой стопа без возврата к open): {symbol} — "
+                    f"{pending['direction'].upper()}"
+                )
+                del pending_limit_entries[symbol]
+                pending = None
+
+        if pending:
+            pending["extreme"] = (max(pending["extreme"], candle["high"]) if bearish2
+                                   else min(pending["extreme"], candle["low"]))
+            touched = (candle["high"] >= pending["entry_open"]) if bearish2 else (candle["low"] <= pending["entry_open"])
+            if touched:
+                entry_price = pending["entry_open"]
+                pair_name   = format_pair_name(symbol)
+                # Дивергенцию считаем заново на момент реального исполнения — с момента
+                # находки паттерна до возврата цены может пройти много времени, за которое
+                # картина по RSI успевает измениться
+                has_divergence = has_rsi_divergence(candles_store[symbol], bearish2)
+                div_str = "есть" if has_divergence else "нет"
+                entry_caption = fmt_entry_caption(
+                    pair_name, pending["direction"], entry_price, pending["stop_price"], pending["take_price"],
+                    pending["pattern_kind"], candle["time"], pending["pump_pct"], pending["pump_window_min"],
+                    has_divergence
+                )
+                log.info(
+                    f"Вход по лимиту ({pending['pattern_kind']}): {symbol} — {pending['direction'].upper()} "
+                    f"{entry_price:.5g} R:R={pending['rr']:.2f} дивергенция={div_str}"
+                )
+                try:
+                    await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    log.warning(f"Ошибка отправки входа {symbol}: {e}")
+                entry_id = save_signal(
+                    symbol, pair_name, pending["direction"], entry_price, candle["time"], pending["pattern_kind"]
+                )
+                etask = asyncio.create_task(
+                    verify_signal(
+                        symbol, pending["direction"], entry_price, None, pair_name, candle["time"], entry_id,
+                        entry_divergence=has_divergence
+                    )
+                )
+                g_background_tasks.add(etask)
+                etask.add_done_callback(g_background_tasks.discard)
+                del pending_limit_entries[symbol]
+
         # Если пара под наблюдением после памп/дампа — проверяем разворотный паттерн + дивергенцию RSI
         watch = pin_bar_watches.get(symbol)
         if watch:
@@ -974,56 +1035,47 @@ async def signal_loop(app: Application):
                 watch["since_signal"].append(candle)
             pattern = find_reversal_pattern(candles_store[symbol], watch["since_signal"], bearish)
             if pattern:
-                # Дивергенция RSI больше не гейт (решение Вячеслава 11.09.2026) — паттерна
-                # + R:R достаточно для входа, дивергенция только помечается в сообщении
-                # как доп. сигнал качества, на усмотрение того, кто читает
-                has_divergence = has_rsi_divergence(candles_store[symbol], bearish)
-                entry_price = pattern["candle"]["close"]
+                # Не входим сразу по close свечи-паттерна — close уже съедает часть отката,
+                # который случается почти всегда (разбор истории 12.09.2026: R:R по open
+                # стабильно и заметно лучше). Считаем R:R "проектно" по open и, если проходит
+                # гейт, ставим лимитку на этот уровень вместо немедленной публикации входа.
+                entry_open  = pattern["entry_open"]
                 stop_price  = pattern["candle"]["high"] if bearish else pattern["candle"]["low"]
-                pair_name   = format_pair_name(symbol)
                 target_price = watch["target_price"]
                 # Тейк валиден, только если он ещё впереди по ходу сделки — иначе цена уже
                 # откатила дальше уровня начала движения к моменту входа
                 take_price = target_price if (
-                    (bearish and target_price < entry_price) or (not bearish and target_price > entry_price)
+                    (bearish and target_price < entry_open) or (not bearish and target_price > entry_open)
                 ) else None
 
                 # Гейт R:R — без тейка (уровень уже пройден) риск/прибыль не посчитать,
                 # приравниваем к провалу фильтра. Само наблюдение снимаем в любом случае:
                 # паттерн разворота уже случился, ждать другого смысла нет.
-                risk   = abs(entry_price - stop_price)
-                reward = abs(take_price - entry_price) if take_price is not None else None
+                risk   = abs(entry_open - stop_price)
+                reward = abs(take_price - entry_open) if take_price is not None else None
                 rr     = (reward / risk) if (reward is not None and risk > 0) else None
                 if rr is None or rr < MIN_RISK_REWARD:
                     rr_str = f"{rr:.2f}" if rr is not None else "нет тейка"
                     log.info(
-                        f"Вход отфильтрован по R:R ({pattern['kind']}): {symbol} — "
+                        f"Вход отфильтрован по R:R ({pattern['kind']}, по open): {symbol} — "
                         f"{watch['direction'].upper()} R:R={rr_str}"
                     )
                 else:
-                    entry_caption = fmt_entry_caption(
-                        pair_name, watch["direction"], entry_price, stop_price, take_price,
-                        pattern["kind"], candle["time"], watch["pump_pct"], watch["pump_window_min"],
-                        has_divergence
-                    )
-                    div_str = "есть" if has_divergence else "нет"
                     log.info(
-                        f"Вход ({pattern['kind']}): {symbol} — {watch['direction'].upper()} "
-                        f"{entry_price:.5g} R:R={rr:.2f} дивергенция={div_str}"
+                        f"Лимит-вход выставлен ({pattern['kind']}): {symbol} — {watch['direction'].upper()} "
+                        f"open={entry_open:.5g} R:R(проект)={rr:.2f}"
                     )
-                    try:
-                        await bot.send_message(CHAT_ID, entry_caption, parse_mode=ParseMode.HTML)
-                    except Exception as e:
-                        log.warning(f"Ошибка отправки входа {symbol}: {e}")
-                    entry_id = save_signal(symbol, pair_name, watch["direction"], entry_price, candle["time"], pattern["kind"])
-                    etask = asyncio.create_task(
-                        verify_signal(
-                            symbol, watch["direction"], entry_price, None, pair_name, candle["time"], entry_id,
-                            entry_divergence=has_divergence
-                        )
-                    )
-                    g_background_tasks.add(etask)
-                    etask.add_done_callback(g_background_tasks.discard)
+                    pending_limit_entries[symbol] = {
+                        "direction":       watch["direction"],
+                        "entry_open":      entry_open,
+                        "stop_price":      stop_price,
+                        "take_price":      take_price,
+                        "pattern_kind":    pattern["kind"],
+                        "pump_pct":        watch["pump_pct"],
+                        "pump_window_min": watch["pump_window_min"],
+                        "extreme":         watch["extreme"],
+                        "rr":              rr,
+                    }
                 del pin_bar_watches[symbol]
             else:
                 watch["candles_left"] -= 1
