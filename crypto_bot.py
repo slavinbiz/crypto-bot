@@ -506,16 +506,24 @@ def find_reversal_pattern(candles: list[dict], since_signal: list[dict], bearish
     момента, максимум PIN_BAR_COMBINE_MAX штук: схлопнутый пин-бар всегда привязан к пику,
     а не к «последним N свечам от сейчас» — иначе окно уезжает от пика, и фигура, сложившаяся
     прямо на развороте, не поймается через несколько свечей.
-    Возвращает {"kind": подпись для сообщения, "candle": итоговая свеча для входа/стопа}
-    или None, если ничего не подошло."""
+    Возвращает {"kind": подпись для сообщения, "candle": итоговая свеча для стопа,
+    "entry_open": open РЕАЛЬНОЙ последней свечи паттерна} или None, если ничего не подошло.
+    entry_open — это НЕ combo["open"] (у схлопнутого пин-бара combo["open"] — open первой
+    свечи от пика, то есть ещё внутри самого рывка). Это open именно той свечи, чья форма
+    подтвердила разворот — уровень, к которому цена часто возвращается перед тем, как
+    уйти в сторону сигнала (см. разбор 12.09.2026 — вход по open даёт R:R заметно лучше,
+    чем по close, потому что close уже съедает часть отката)."""
     if len(candles) >= 2 and is_engulfing(candles[-2], candles[-1], bearish):
-        return {"kind": "поглощение", "candle": candles[-1]}
+        return {"kind": "поглощение", "candle": candles[-1], "entry_open": candles[-1]["open"]}
     if is_pin_bar(candles[-1], bearish):
-        return {"kind": "пин-бар", "candle": candles[-1]}
+        return {"kind": "пин-бар", "candle": candles[-1], "entry_open": candles[-1]["open"]}
     for n in range(2, len(since_signal) + 1):
         combo = combine_candles(since_signal[:n])
         if is_pin_bar(combo, bearish):
-            return {"kind": f"пин-бар за {n * INTERVAL_MINUTES} мин", "candle": combo}
+            return {
+                "kind": f"пин-бар за {n * INTERVAL_MINUTES} мин", "candle": combo,
+                "entry_open": since_signal[n - 1]["open"],
+            }
     return None
 
 
