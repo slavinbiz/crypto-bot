@@ -59,17 +59,21 @@ def fmt_caption(pair_name, signal_label, pump_pct, price_then, price_now, chg_24
 
 def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_price: float,
                        take_price: float | None, pattern_kind: str, pattern_time: datetime,
-                       pump_pct: float, pump_window_min: int, has_divergence: bool) -> str:
+                       pump_pct: float, pump_window_min: int, has_divergence: bool,
+                       attempt: int = 1) -> str:
     """Caption для входа после разворотного паттерна (пин-бар/поглощение) — разворот
     против исходного памп/дампа. take_price — уровень начала движения (обычно цена
     откатывает как минимум туда); None, если движение уже откатило дальше этого уровня
     к моменту входа — тогда цель пропускаем, решать руками. has_divergence — только
     пометка в сообщении (с 11.09.2026 дивергенция RSI не гейт для входа, решает паттерн+R:R),
-    подсказка, что сигнал сильнее обычного."""
+    подсказка, что сигнал сильнее обычного. attempt — какая по счёту попытка разворота на
+    этом памп/дамп-рывке (решение 16.09.2026, разбор XLMUSDT 23:15): если > 1, это не новый
+    независимый сигнал, а повторный заход после стоп-аута/отменённой лимитки."""
     direction_label = "🟢 LONG" if direction == "long" else "🔴 SHORT"
     move_label = "дампа" if direction == "long" else "пампа"
     time_str = fmt_msk(pattern_time)
     div_line = "RSI-дивергенция: есть\n" if has_divergence else "RSI-дивергенция: нет\n"
+    retry_line = f"🔁 Повторная попытка ({attempt}/{MAX_ENTRY_ATTEMPTS})\n" if attempt > 1 else ""
     take_line = (
         f"Тейк: <code>{take_price:.5g}</code> (начало движения)\n"
         if take_price is not None else
@@ -77,6 +81,7 @@ def fmt_entry_caption(pair_name: str, direction: str, entry_price: float, stop_p
     )
     return (
         f"🎯 Вход <code>{pair_name}</code>  <i>Binance</i>  {direction_label}\n"
+        f"{retry_line}"
         f"{pattern_kind.capitalize()} {time_str} после {move_label} {pump_pct:+.2f}% за {pump_window_min} мин\n"
         f"{div_line}"
         f"Вход: <code>{entry_price:.5g}</code>\n"
@@ -485,6 +490,29 @@ PIN_BAR_WICK_MULT      = 2.0   # хвост пин-бара минимум во 
 PIN_BAR_WICK_SHARE_MIN = 0.6   # и минимум такая доля всего диапазона свечи (high-low)
 
 MIN_RISK_REWARD = 3.0   # минимум R:R (тейк/стоп от входа), иначе вход не публикуем — решение Вячеслава 10.09.2026
+
+MAX_ENTRY_ATTEMPTS = 2   # сколько попыток разворота даём на один памп/дамп-рывок — решение
+                          # Вячеслава 16.09.2026, разбор XLMUSDT 23:15: после стоп-аута или
+                          # отмены лимитки без входа пробуем тот же разворот ещё раз (новый
+                          # паттерн на том же рывке), а не только ждём независимый новый сигнал
+
+
+def build_retry_watch(direction: str, extreme: float, pump_pct: float, pump_window_min: int,
+                       target_price: float, since_candle: dict, attempt: int) -> dict:
+    """Пересобрать наблюдение за разворотом для повторной попытки на том же памп/дамп-рывке:
+    памп-контекст и экстремум (важно — НЕ сбрасываем, иначе инвалидация будет неверно
+    сравнивать со свежей точкой вместо худшей за всё время) переносятся как есть, окно свечей
+    на поиск паттерна — с нуля."""
+    return {
+        "direction":       direction,
+        "candles_left":    PIN_BAR_WATCH_CANDLES,
+        "pump_pct":        pump_pct,
+        "pump_window_min": pump_window_min,
+        "target_price":    target_price,
+        "since_signal":    [since_candle],
+        "extreme":         extreme,
+        "attempt":         attempt,
+    }
 
 
 def is_pin_bar(candle: dict, bearish: bool) -> bool:
@@ -1018,6 +1046,17 @@ async def signal_loop(app: Application):
                     )
                 except Exception as e:
                     log.warning(f"Ошибка отправки исхода сделки {symbol}: {e}")
+                if outcome == "stop" and position.get("attempt", 1) < MAX_ENTRY_ATTEMPTS:
+                    pin_bar_watches[symbol] = build_retry_watch(
+                        direction       = position["direction"],
+                        extreme         = position["stop_price"],
+                        pump_pct        = position["pump_pct"],
+                        pump_window_min = position["pump_window_min"],
+                        target_price    = position["target_price"],
+                        since_candle    = candle,
+                        attempt         = position.get("attempt", 1) + 1,
+                    )
+                    log.info(f"Повторная попытка разворота вооружена: {symbol} — {position['direction'].upper()}")
                 del open_positions[symbol]
 
         # Лимитка на возврат к open свечи-паттерна — проверяем раньше самого наблюдения
@@ -1030,10 +1069,22 @@ async def signal_loop(app: Application):
             # молча, без входа (сравниваем со СТАРЫМ экстремумом, до этой свечи)
             invalidated2 = (candle["close"] > pending["extreme"]) if bearish2 else (candle["close"] < pending["extreme"])
             if invalidated2:
+                attempt = pending.get("attempt", 1)
                 log.info(
                     f"Лимит-вход отменён (пробой стопа без возврата к open): {symbol} — "
-                    f"{pending['direction'].upper()}"
+                    f"{pending['direction'].upper()} (попытка {attempt}/{MAX_ENTRY_ATTEMPTS})"
                 )
+                if attempt < MAX_ENTRY_ATTEMPTS:
+                    pin_bar_watches[symbol] = build_retry_watch(
+                        direction       = pending["direction"],
+                        extreme         = pending["extreme"],
+                        pump_pct        = pending["pump_pct"],
+                        pump_window_min = pending["pump_window_min"],
+                        target_price    = pending["target_price"],
+                        since_candle    = candle,
+                        attempt         = attempt + 1,
+                    )
+                    log.info(f"Повторная попытка разворота вооружена: {symbol} — {pending['direction'].upper()}")
                 del pending_limit_entries[symbol]
                 pending = None
 
@@ -1052,7 +1103,7 @@ async def signal_loop(app: Application):
                 entry_caption = fmt_entry_caption(
                     pair_name, pending["direction"], entry_price, pending["stop_price"], pending["take_price"],
                     pending["pattern_kind"], candle["time"], pending["pump_pct"], pending["pump_window_min"],
-                    has_divergence
+                    has_divergence, attempt=pending.get("attempt", 1)
                 )
                 log.info(
                     f"Вход по лимиту ({pending['pattern_kind']}): {symbol} — {pending['direction'].upper()} "
@@ -1066,12 +1117,16 @@ async def signal_loop(app: Application):
                     symbol, pair_name, pending["direction"], entry_price, candle["time"], pending["pattern_kind"]
                 )
                 open_positions[symbol] = {
-                    "direction":   pending["direction"],
-                    "entry_price": entry_price,
-                    "stop_price":  pending["stop_price"],
-                    "take_price":  pending["take_price"],
-                    "signal_id":   entry_id,
-                    "pair_name":   pair_name,
+                    "direction":       pending["direction"],
+                    "entry_price":     entry_price,
+                    "stop_price":      pending["stop_price"],
+                    "take_price":      pending["take_price"],
+                    "signal_id":       entry_id,
+                    "pair_name":       pair_name,
+                    "pump_pct":        pending["pump_pct"],
+                    "pump_window_min": pending["pump_window_min"],
+                    "target_price":    pending["target_price"],
+                    "attempt":         pending.get("attempt", 1),
                 }
                 etask = asyncio.create_task(
                     verify_signal(
@@ -1143,8 +1198,10 @@ async def signal_loop(app: Application):
                         "pattern_kind":    pattern["kind"],
                         "pump_pct":        watch["pump_pct"],
                         "pump_window_min": watch["pump_window_min"],
+                        "target_price":    watch["target_price"],
                         "extreme":         watch["extreme"],
                         "rr":              rr,
+                        "attempt":         watch.get("attempt", 1),
                     }
                 del pin_bar_watches[symbol]
             else:
@@ -1185,15 +1242,15 @@ async def signal_loop(app: Application):
         # extreme — экстремум пика (high для шорт-наблюдения, low для лонг-наблюдения):
         # если цена ЗАКРОЕТСЯ за этим уровнем без разворотного паттерна — наблюдение отменяется,
         # разворота не было, идёт продолжение
-        pin_bar_watches[symbol] = {
-            "direction":       "short" if direction == "long" else "long",
-            "candles_left":    PIN_BAR_WATCH_CANDLES,
-            "pump_pct":        pump_pct,
-            "pump_window_min": window * INTERVAL_MINUTES,
-            "target_price":    price_then,
-            "since_signal":    [candle],   # свеча пика — начало окна для схлопнутого пин-бара
-            "extreme":         candle["high"] if direction == "long" else candle["low"],
-        }
+        pin_bar_watches[symbol] = build_retry_watch(
+            direction       = "short" if direction == "long" else "long",
+            extreme         = candle["high"] if direction == "long" else candle["low"],
+            pump_pct        = pump_pct,
+            pump_window_min = window * INTERVAL_MINUTES,
+            target_price    = price_then,
+            since_candle    = candle,
+            attempt         = 1,
+        )
 
         caption = fmt_caption(
             pair_name, signal_label, pump_pct,
