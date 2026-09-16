@@ -223,6 +223,15 @@ def init_signals_db(db_path: str = SIGNALS_DB) -> None:
             verdict TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signal_outcomes (
+            signal_id INTEGER NOT NULL REFERENCES signals(id),
+            outcome TEXT NOT NULL,
+            exit_price REAL NOT NULL,
+            pct REAL NOT NULL,
+            exit_time TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -253,6 +262,21 @@ def save_signal_check(signal_id: int, minutes: int, pct: float | None, verdict: 
     conn.execute(
         "INSERT INTO signal_checks (signal_id, minutes, pct, verdict) VALUES (?, ?, ?, ?)",
         (signal_id, minutes, pct, verdict)
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_signal_outcome(signal_id: int, outcome: str, exit_price: float, pct: float,
+                         exit_time: datetime, db_path: str = SIGNALS_DB) -> None:
+    """Записать фактический исход сделки — стоп или тейк реально задет ценой (high/low
+    свечи), в отличие от verify_signal, который лишь грубо оценивает % отклонения от входа
+    с дедзоной ±0.5%, не зная настоящих уровней стопа/тейка конкретной сделки (разбор
+    16.09.2026: тейк-профит и стоп после входа вообще не отслеживались)."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO signal_outcomes (signal_id, outcome, exit_price, pct, exit_time) VALUES (?, ?, ?, ?, ?)",
+        (signal_id, outcome, exit_price, pct, exit_time.isoformat())
     )
     conn.commit()
     conn.close()
@@ -887,6 +911,13 @@ async def signal_loop(app: Application):
     # "entry_open", "stop_price", "take_price", "pattern_kind", "pump_pct",
     # "pump_window_min", "extreme", "rr"}.
     pending_limit_entries: dict[str, dict] = {}
+    # Вход исполнен, сделка живая — ждём, пока цена реально заденет стоп или тейк.
+    # symbol -> {"direction", "entry_price", "stop_price", "take_price", "signal_id",
+    # "pair_name"}. Только для входов с известными стоп/тейк (через pending_limit_entries) —
+    # решение Вячеслава 16.09.2026, разбор сигнала XLMUSDT 23:15: verify_signal сам по себе
+    # не знает реальных уровней сделки и не сообщает, когда стоп/тейк сработали. Как и
+    # pending_limit_entries/pin_bar_watches, при рестарте бота теряется (тот же принятый риск).
+    open_positions: dict[str, dict] = {}
     _last_refresh = 0.0
 
     async def load_symbols():
@@ -958,6 +989,37 @@ async def signal_loop(app: Application):
         if len(candles_store[symbol]) > LOOKBACK:
             candles_store[symbol] = candles_store[symbol][-LOOKBACK:]
 
+        # Позиция уже открыта (вход исполнен) — проверяем, не задела ли эта свеча реально
+        # стоп или тейк. Проверяем раньше pending/watch, т.к. это самая поздняя стадия сделки.
+        position = open_positions.get(symbol)
+        if position:
+            bearish3 = position["direction"] == "short"
+            stop_hit = (candle["high"] >= position["stop_price"]) if bearish3 else (candle["low"] <= position["stop_price"])
+            take_hit = (
+                ((candle["low"] <= position["take_price"]) if bearish3 else (candle["high"] >= position["take_price"]))
+                if position["take_price"] is not None else False
+            )
+            if stop_hit or take_hit:
+                # Если в одной свече задеты оба уровня — порядок внутри свечи неизвестен,
+                # берём худший случай (стоп)
+                outcome = "stop" if stop_hit else "take"
+                exit_price = position["stop_price"] if stop_hit else position["take_price"]
+                pct = (exit_price - position["entry_price"]) / position["entry_price"] * 100
+                pct = pct if position["direction"] == "long" else -pct
+                save_signal_outcome(position["signal_id"], outcome, exit_price, pct, candle["time"])
+                label = "🛑 Стоп" if outcome == "stop" else "🎯 Тейк"
+                log.info(f"{label}: {symbol} — {position['direction'].upper()} {pct:+.2f}%")
+                try:
+                    await bot.send_message(
+                        CHAT_ID,
+                        f"{label} <code>{position['pair_name']}</code> — "
+                        f"<b>{pct:+.2f}%</b> (цена {exit_price:.5g})",
+                        parse_mode=ParseMode.HTML
+                    )
+                except Exception as e:
+                    log.warning(f"Ошибка отправки исхода сделки {symbol}: {e}")
+                del open_positions[symbol]
+
         # Лимитка на возврат к open свечи-паттерна — проверяем раньше самого наблюдения
         # за паттерном, т.к. это следующая стадия той же сделки (наблюдение уже снято)
         pending = pending_limit_entries.get(symbol)
@@ -1003,6 +1065,14 @@ async def signal_loop(app: Application):
                 entry_id = save_signal(
                     symbol, pair_name, pending["direction"], entry_price, candle["time"], pending["pattern_kind"]
                 )
+                open_positions[symbol] = {
+                    "direction":   pending["direction"],
+                    "entry_price": entry_price,
+                    "stop_price":  pending["stop_price"],
+                    "take_price":  pending["take_price"],
+                    "signal_id":   entry_id,
+                    "pair_name":   pair_name,
+                }
                 etask = asyncio.create_task(
                     verify_signal(
                         symbol, pending["direction"], entry_price, None, pair_name, candle["time"], entry_id,
